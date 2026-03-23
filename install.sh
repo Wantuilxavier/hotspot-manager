@@ -284,20 +284,32 @@ install_mariadb() {
         info "Socket encontrado em: ${SOCKET}"
     fi
 
-    # Testa conectividade (unix_socket como root do sistema, sem senha)
-    local DB_CONNECT="mariadb --connect-timeout=10"
-    [[ -n "$SOCKET" ]] && DB_CONNECT="mariadb --connect-timeout=10 --socket=${SOCKET}"
+    # No Debian 13 + MariaDB 11.x o root não usa unix_socket por padrão.
+    # O Debian cria o usuário 'debian-sys-maint' em /etc/mysql/debian.cnf
+    # para operações de manutenção sem senha do root — usamos ele aqui.
+    local DEBIAN_CNF="/etc/mysql/debian.cnf"
+    local DB_CONNECT
+
+    if [[ -f "$DEBIAN_CNF" ]]; then
+        info "Usando credenciais de manutenção do Debian (${DEBIAN_CNF})..."
+        DB_CONNECT="mariadb --defaults-file=${DEBIAN_CNF} --connect-timeout=10"
+        [[ -n "$SOCKET" ]] && DB_CONNECT="mariadb --defaults-file=${DEBIAN_CNF} --connect-timeout=10 --socket=${SOCKET}"
+    else
+        warn "${DEBIAN_CNF} não encontrado — tentando unix_socket como root..."
+        DB_CONNECT="mariadb --connect-timeout=10"
+        [[ -n "$SOCKET" ]] && DB_CONNECT="mariadb --connect-timeout=10 --socket=${SOCKET}"
+    fi
 
     local RETRIES=0
     until $DB_CONNECT -e "SELECT 1;" &>/dev/null; do
-        RETRIES=$(( RETRIES + 1 ))   # (( RETRIES++ )) exitaria com set -e quando RETRIES=0
+        RETRIES=$(( RETRIES + 1 ))
         [[ $RETRIES -ge 10 ]] && error "MariaDB não responde após ${RETRIES} tentativas. Verifique: journalctl -u mariadb -n 30"
         warn "Aguardando MariaDB... tentativa ${RETRIES}/10"
         sleep 3
     done
     success "MariaDB pronto."
 
-    # Hardening: migra para senha e remove contas desnecessárias
+    # Hardening: define senha para root e remove contas desnecessárias
     $DB_CONNECT <<SQL
 ALTER USER 'root'@'localhost' IDENTIFIED VIA mysql_native_password USING PASSWORD('${MYSQL_ROOT_PASS}');
 DELETE FROM mysql.user WHERE User='';
@@ -307,7 +319,7 @@ DELETE FROM mysql.db WHERE Db='test' OR Db='test\\_%';
 FLUSH PRIVILEGES;
 SQL
 
-    # Cria banco e usuário do RADIUS (agora com senha root definida)
+    # Cria banco e usuário do RADIUS (usa a senha root recém-definida)
     mariadb -u root -p"${MYSQL_ROOT_PASS}" <<SQL
 CREATE DATABASE IF NOT EXISTS radius
     CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
