@@ -1,0 +1,63 @@
+##############################################################################
+# Dicionário de atributos VSA (Vendor-Specific Attributes) da MikroTik.
+#
+# Instalação:
+#   Copie este arquivo para /usr/share/freeradius/dictionary.mikrotik
+#   e adicione ao /usr/share/freeradius/dictionary:
+#       $INCLUDE dictionary.mikrotik
+#
+# Vendor ID MikroTik: 14988
+##############################################################################
+
+VENDOR          MikroTik        14988
+
+BEGIN-VENDOR    MikroTik
+
+# ─── Controle de banda (mais importante para Hotspot) ──────────────────────
+ATTRIBUTE       Mikrotik-Rate-Limit             1   string
+# Formato: "upload/download" ou "upload/download burst-up/burst-down
+#           burst-threshold-up/burst-threshold-down burst-time-up/burst-time-down"
+# Exemplos:
+#   "5M/10M"                         → 5Mbps upload, 10Mbps download
+#   "5M/10M 10M/20M 7M/14M 15"       → com burst
+
+# ─── Grupos e perfis ───────────────────────────────────────────────────────
+ATTRIBUTE       Mikrotik-Group                  2   string
+# Nome do perfil no Hotspot do MikroTik (/ip hotspot user profile)
+
+ATTRIBUTE       Mikrotik-Wireless-Forward       3   integer
+ATTRIBUTE       Mikrotik-Wireless-Skip-Dot11h   4   integer
+ATTRIBUTE       Mikrotik-Wireless-Enc-Algo      5   integer
+ATTRIBUTE       Mikrotik-Wireless-Enc-Key       6   string
+
+# ─── IP, roteamento ────────────────────────────────────────────────────────
+ATTRIBUTE       Mikrotik-Recv-Limit             7   integer
+ATTRIBUTE       Mikrotik-Xmit-Limit             8   integer
+ATTRIBUTE       Mikrotik-Advertise-URL          9   string
+ATTRIBUTE       Mikrotik-Advertise-Interval    10   integer
+ATTRIBUTE       Mikrotik-Recv-Limit-Gigawords  11   integer
+ATTRIBUTE       Mikrotik-Xmit-Limit-Gigawords  12   integer
+ATTRIBUTE       Mikrotik-Wireless-PSK          13   string
+ATTRIBUTE       Mikrotik-Total-Limit           14   integer
+ATTRIBUTE       Mikrotik-Total-Limit-Gigawords 15   integer
+ATTRIBUTE       Mikrotik-Address-List          16   string
+ATTRIBUTE       Mikrotik-Wireless-MPKey        17   string
+ATTRIBUTE       Mikrotik-Wireless-Comment      18   string
+ATTRIBUTE       Mikrotik-Delegated-IPv6-Pool   19   string
+
+# ─── DHCP ─────────────────────────────────────────────────────────────────
+ATTRIBUTE       Mikrotik-DHCP-Option-Set       20   string
+ATTRIBUTE       Mikrotik-DHCP-Option-Param-STR1 21  string
+ATTRIBUTE       Mikrotik-DHCP-Option-Param-STR2 22  string
+
+# ─── Host IP ───────────────────────────────────────────────────────────────
+ATTRIBUTE       Mikrotik-Host-IP               23   ipaddr
+
+# ─── Mark de roteamento ────────────────────────────────────────────────────
+ATTRIBUTE       Mikrotik-Mark-Id               24   string
+ATTRIBUTE       Mikrotik-Out-Interface         25   string
+
+# ─── QoS / queues ──────────────────────────────────────────────────────────
+ATTRIBUTE       Mikrotik-Rate-Limit-Min        26   string
+
+END-VENDOR      MikroTik

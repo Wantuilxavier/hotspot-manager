@@ -1,0 +1,90 @@
+##############################################################################
+# FreeRADIUS 3 — Módulo SQL (MySQL/MariaDB)
+# Arquivo: /etc/freeradius/3.0/mods-available/sql
+# Ativar: ln -s /etc/freeradius/3.0/mods-available/sql \
+#                /etc/freeradius/3.0/mods-enabled/sql
+##############################################################################
+
+sql {
+    # Driver MySQL
+    driver = "rlm_sql_mysql"
+
+    # Dialeto para as queries padrão
+    dialect = "mysql"
+
+    # ─── Conexão ──────────────────────────────────────────────────────────
+    server   = "127.0.0.1"
+    port     = 3306
+    login    = "radius"
+    password = "secret"                  # <── altere para DB_PASSWORD
+    radius_db = "radius"                 # <── altere para DB_DATABASE
+
+    # Parâmetros de conexão MySQL
+    mysql {
+        tls {
+            # tls_ca_file   = "/etc/ssl/certs/ca-certificates.crt"
+            # tls_cert_file = "/path/to/client.crt"
+            # tls_key_file  = "/path/to/client.key"
+        }
+        warnings = auto
+    }
+
+    # ─── Pool de conexões ──────────────────────────────────────────────────
+    pool {
+        start    = ${thread[pool].start_servers}
+        min      = ${thread[pool].min_spare_servers}
+        max      = ${thread[pool].max_servers}
+        spare    = ${thread[pool].max_spare_servers}
+        uses     = 0
+        retry_delay = 30
+        lifetime = 0
+        idle_timeout = 60
+    }
+
+    # ─── Queries ───────────────────────────────────────────────────────────
+    # Usa as queries padrão do dialeto MySQL (arquivo sql/mysql/queries.conf)
+    # O schema padrão do FreeRADIUS é compatível com nossas migrations.
+
+    # Encoding para suporte UTF-8
+    query_timeout = 5
+
+    # Habilita o cache de grupo (melhora performance)
+    group_attribute = "SQL-Group"
+
+    # ─── Tabelas ───────────────────────────────────────────────────────────
+    # Estas devem coincidir com as migrations do Hotspot Manager
+
+    # Tabela de autenticação (radcheck)
+    authcheck_table = "radcheck"
+
+    # Tabela de grupos de autenticação (radgroupcheck)
+    authreply_table = "radreply"
+
+    # Tabela de reply de grupo (radgroupreply)
+    groupcheck_table = "radgroupcheck"
+    groupreply_table = "radgroupreply"
+
+    # Tabela de membros de grupo (radusergroup)
+    usergroup_table = "radusergroup"
+
+    # Tabela de accounting (radacct)
+    acct_table1 = "radacct"
+    acct_table2 = "radacct"
+
+    # Tabela de pós-autenticação (radpostauth)
+    postauth_table = "radpostauth"
+
+    # Tabela NAS
+    nas_table = "nas"
+
+    # ─── Acct queries ──────────────────────────────────────────────────────
+    # Intervalo de update do accounting em segundos (0 = desabilitado)
+    # O MikroTik envia Interim-Update a cada N segundos (configurar no /radius)
+    # Recomendado: 300 (5 minutos)
+    # Definido no servidor MikroTik, não aqui.
+
+    # ─── Leitura NAS do SQL ────────────────────────────────────────────────
+    # Permite definir clientes RADIUS direto no banco sem editar clients.conf
+    # read_clients = yes
+    # client_table = "nas"
+}

@@ -1,0 +1,23 @@
+# Normaliza line endings para LF em todos os arquivos de texto
+* text=auto eol=lf
+
+# Scripts bash devem ter LF obrigatoriamente
+*.sh text eol=lf
+
+# PHP, Blade, JSON, Markdown
+*.php text eol=lf
+*.blade.php text eol=lf
+*.json text eol=lf
+*.md text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+
+# Binários — sem conversão
+*.png binary
+*.jpg binary
+*.gif binary
+*.ico binary
+*.woff binary
+*.woff2 binary
+*.ttf binary
+*.eot binary
