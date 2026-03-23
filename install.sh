@@ -308,12 +308,35 @@ install_app() {
     step "5/9 — Instalando a aplicação Laravel"
 
     # Clona ou atualiza o repositório
+    # Usa SSH (git@github.com) — mesmo protocolo do push, sem autenticação interativa.
+    # Pré-requisito: a chave SSH do servidor deve estar adicionada ao GitHub.
+    local REPO_SSH="git@github.com:Wantuilxavier/hotspot-manager.git"
+    local REPO_HTTPS="https://github.com/Wantuilxavier/hotspot-manager.git"
+
     if [[ -d "${INSTALL_DIR}/.git" ]]; then
-        info "Repositório já existe. Atualizando..."
+        info "Repositório já existe em ${INSTALL_DIR}. Atualizando..."
         git -C "$INSTALL_DIR" pull --ff-only
     else
-        info "Clonando repositório..."
-        git clone https://github.com/Wantuilxavier/hotspot-manager.git "$INSTALL_DIR"
+        info "Clonando repositório via SSH..."
+
+        # Garante que o fingerprint do GitHub está aceito (evita prompt interativo)
+        mkdir -p /root/.ssh
+        ssh-keyscan -H github.com >> /root/.ssh/known_hosts 2>/dev/null
+
+        if GIT_SSH_COMMAND="ssh -o BatchMode=yes" git clone --depth=1 "$REPO_SSH" "$INSTALL_DIR" 2>/dev/null; then
+            success "Repositório clonado via SSH."
+        else
+            warn "Clone SSH falhou. Tentando HTTPS (funciona apenas se o repositório for público)..."
+            GIT_TERMINAL_PROMPT=0 git clone --depth=1 "$REPO_HTTPS" "$INSTALL_DIR" \
+                || error "Falha ao clonar o repositório.
+
+  Opção 1 — Torne o repositório público no GitHub:
+    https://github.com/Wantuilxavier/hotspot-manager/settings
+
+  Opção 2 — Adicione a chave SSH deste servidor ao GitHub:
+    Chave pública: $(cat /root/.ssh/id_ed25519.pub 2>/dev/null || cat /root/.ssh/id_rsa.pub 2>/dev/null || echo '[nenhuma chave encontrada — gere com: ssh-keygen -t ed25519]')
+    Adicionar em: https://github.com/settings/ssh/new"
+        fi
     fi
 
     cd "$INSTALL_DIR"
@@ -361,14 +384,20 @@ MAIL_FROM_NAME="Hotspot Manager"
 EOF
 
     # ── Dependências ────────────────────────────────────────────────────────
+    # --no-scripts evita que package:discover rode antes do APP_KEY existir,
+    # causando falha no bootstrap do Laravel durante o composer install.
     info "Instalando dependências PHP via Composer..."
     COMPOSER_ALLOW_SUPERUSER=1 composer install \
-        --no-dev --optimize-autoloader --no-interaction --quiet
+        --no-dev --optimize-autoloader --no-interaction --quiet --no-scripts
     success "Dependências instaladas."
 
-    # ── Chave ───────────────────────────────────────────────────────────────
+    # ── Chave (deve vir antes de qualquer artisan command) ───────────────────
     php artisan key:generate --force --ansi
     success "APP_KEY gerada."
+
+    # ── Package discover (agora que o APP_KEY existe) ────────────────────────
+    php artisan package:discover --ansi
+    success "Package discovery concluído."
 
     # ── Banco ───────────────────────────────────────────────────────────────
     info "Executando migrations (criando schema RADIUS)..."
