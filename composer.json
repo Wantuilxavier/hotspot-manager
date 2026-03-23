@@ -5,8 +5,10 @@
     "require": {
         "php": "^8.2",
         "laravel/framework": "^11.0",
-        "laravel/tinker": "^2.9",
-        "pear/net_routeros": "^1.0"
+        "laravel/tinker": "^2.9"
+    },
+    "suggest": {
+        "pear2/net_routeros": "Necessário para integração via RouterOS API (MIKROTIK_ENABLED=true). Instale com: composer require pear2/net_routeros"
     },
     "require-dev": {
         "fakerphp/faker": "^1.23",
