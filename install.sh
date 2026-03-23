@@ -274,7 +274,7 @@ install_mariadb() {
             fi
         done
         sleep 1
-        (( WAITED++ ))
+        WAITED=$(( WAITED + 1 ))   # (( WAITED++ )) exitaria com set -e quando WAITED=0
     done
 
     if [[ -z "$SOCKET" ]]; then
@@ -290,12 +290,12 @@ install_mariadb() {
 
     local RETRIES=0
     until $DB_CONNECT -e "SELECT 1;" &>/dev/null; do
-        (( RETRIES++ ))
+        RETRIES=$(( RETRIES + 1 ))   # (( RETRIES++ )) exitaria com set -e quando RETRIES=0
         [[ $RETRIES -ge 10 ]] && error "MariaDB não responde após ${RETRIES} tentativas. Verifique: journalctl -u mariadb -n 30"
         warn "Aguardando MariaDB... tentativa ${RETRIES}/10"
         sleep 3
     done
-    success "MariaDB pronto (${RETRIES} retentativa(s))."
+    success "MariaDB pronto."
 
     # Hardening: migra para senha e remove contas desnecessárias
     $DB_CONNECT <<SQL
