@@ -257,19 +257,48 @@ install_mariadb() {
     fi
 
     apt-get install -y -qq mariadb-server mariadb-client
-    systemctl enable --now mariadb
-    success "MariaDB instalado e iniciado."
+    systemctl enable mariadb
+    systemctl start mariadb
+    success "MariaDB instalado."
 
-    # No Debian, MariaDB usa unix_socket auth por padrão.
-    # Rodando como root do sistema, conecta sem -u e sem senha.
-    # Testa a conexão antes de prosseguir.
-    if ! mariadb --connect-timeout=10 -e "SELECT 1;" &>/dev/null; then
-        error "Não foi possível conectar ao MariaDB via unix_socket. Verifique: systemctl status mariadb"
+    # Aguarda o socket ficar disponível (até 30s)
+    local SOCKET=""
+    local WAITED=0
+    info "Aguardando MariaDB ficar pronto..."
+    while [[ $WAITED -lt 30 ]]; do
+        # Localiza o socket em uso
+        for s in /run/mysqld/mysqld.sock /var/run/mysqld/mysqld.sock /tmp/mysql.sock; do
+            if [[ -S "$s" ]]; then
+                SOCKET="$s"
+                break 2
+            fi
+        done
+        sleep 1
+        (( WAITED++ ))
+    done
+
+    if [[ -z "$SOCKET" ]]; then
+        warn "Socket não encontrado nos caminhos padrão. Tentando via TCP..."
+        SOCKET=""
+    else
+        info "Socket encontrado em: ${SOCKET}"
     fi
 
-    # Hardening: define senha root, remove anônimos e banco test
-    mariadb <<SQL
--- Troca para autenticação por senha (necessário para scripts não-interativos)
+    # Testa conectividade (unix_socket como root do sistema, sem senha)
+    local DB_CONNECT="mariadb --connect-timeout=10"
+    [[ -n "$SOCKET" ]] && DB_CONNECT="mariadb --connect-timeout=10 --socket=${SOCKET}"
+
+    local RETRIES=0
+    until $DB_CONNECT -e "SELECT 1;" &>/dev/null; do
+        (( RETRIES++ ))
+        [[ $RETRIES -ge 10 ]] && error "MariaDB não responde após ${RETRIES} tentativas. Verifique: journalctl -u mariadb -n 30"
+        warn "Aguardando MariaDB... tentativa ${RETRIES}/10"
+        sleep 3
+    done
+    success "MariaDB pronto (${RETRIES} retentativa(s))."
+
+    # Hardening: migra para senha e remove contas desnecessárias
+    $DB_CONNECT <<SQL
 ALTER USER 'root'@'localhost' IDENTIFIED VIA mysql_native_password USING PASSWORD('${MYSQL_ROOT_PASS}');
 DELETE FROM mysql.user WHERE User='';
 DELETE FROM mysql.user WHERE User='root' AND Host NOT IN ('localhost','127.0.0.1','::1');
