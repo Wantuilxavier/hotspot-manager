@@ -460,6 +460,16 @@ install_freeradius() {
     ln -sf "${FR_DIR}/mods-available/sql" "${FR_DIR}/mods-enabled/sql" 2>/dev/null || true
     success "Módulo SQL configurado."
 
+    # ── Módulos necessários ────────────────────────────────────────────────
+    # Habilita módulos usados pelo virtual server hotspot
+    for mod in preprocess pap chap acct_unique attr_filter; do
+        if [[ -f "${FR_DIR}/mods-available/${mod}" ]]; then
+            ln -sf "${FR_DIR}/mods-available/${mod}" \
+                   "${FR_DIR}/mods-enabled/${mod}" 2>/dev/null || true
+        fi
+    done
+    success "Módulos FreeRADIUS habilitados."
+
     # ── Virtual server hotspot ─────────────────────────────────────────────
     cp "${INSTALL_DIR}/freeradius/sites-available/hotspot" \
        "${FR_DIR}/sites-available/hotspot"
@@ -489,16 +499,27 @@ EOF
         success "MikroTik (${MIKROTIK_IP}) adicionado ao clients.conf."
     fi
 
-    # ── FreeRADIUS roda como freerad — mantém permissão padrão ─────────────
+    # ── Permissões ─────────────────────────────────────────────────────────
     chown -R freerad:freerad "${FR_DIR}"
 
-    # Valida e (re)inicia
-    if freeradius -C -l stdout 2>&1 | grep -qi "error"; then
-        warn "FreeRADIUS tem erros de configuração. Rode: freeradius -X para debug."
+    # ── Valida configuração antes de iniciar ────────────────────────────────
+    local FR_CHECK
+    FR_CHECK=$(freeradius -XC 2>&1) || true
+
+    if echo "$FR_CHECK" | grep -qi "error"; then
+        warn "FreeRADIUS detectou erros de configuração:"
+        echo "$FR_CHECK" | grep -i "error" | head -10
+        warn "Para debug completo rode: freeradius -X"
+        warn "O script continua — corrija o FreeRADIUS manualmente após a instalação."
     else
         systemctl enable freeradius
-        systemctl restart freeradius
-        success "FreeRADIUS iniciado com sucesso."
+        systemctl restart freeradius \
+            && success "FreeRADIUS iniciado com sucesso." \
+            || {
+                warn "FreeRADIUS falhou ao iniciar. Saída do journalctl:"
+                journalctl -u freeradius -n 20 --no-pager || true
+                warn "Corrija e rode: systemctl restart freeradius"
+            }
     fi
 
     # Salva secret

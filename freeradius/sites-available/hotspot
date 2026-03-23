@@ -1,113 +1,64 @@
 ##############################################################################
 # FreeRADIUS 3 — Virtual Server para MikroTik Hotspot
-# Arquivo: /etc/freeradius/3.0/sites-available/hotspot
-# Ativar: ln -s /etc/freeradius/3.0/sites-available/hotspot \
-#                /etc/freeradius/3.0/sites-enabled/hotspot
-#
-# Para usar este arquivo em substituição ao "default", edite o
-# sites-enabled/default ou crie este como virtual server adicional.
+# Usa apenas módulos que estão habilitados por padrão no Debian.
 ##############################################################################
 
 server hotspot {
 
-    # ─── Listen: Authentication ────────────────────────────────────────────
     listen {
-        type      = auth
-        ipaddr    = *
-        port      = 0       # 0 = porta padrão (1812)
+        type   = auth
+        ipaddr = *
+        port   = 0
     }
 
-    # ─── Listen: Accounting ────────────────────────────────────────────────
     listen {
-        type      = acct
-        ipaddr    = *
-        port      = 0       # 0 = porta padrão (1813)
+        type   = acct
+        ipaddr = *
+        port   = 0
     }
 
-    # ══════════════════════════════════════════════════════════════════════
-    # AUTHORIZE — Identifica o usuário e carrega seus atributos do SQL
-    # ══════════════════════════════════════════════════════════════════════
+    # ── AUTHORIZE ─────────────────────────────────────────────────────────────
     authorize {
-        # Filtra requisições do MikroTik Hotspot (User-Password attribute)
-        filter_username
+        preprocess      # normaliza User-Name
 
-        # Normaliza o User-Name (remove espaços, etc.)
-        preprocess
-
-        # Tenta carregar usuário do SQL (radcheck, radreply, radusergroup)
+        # Carrega radcheck, radreply, radusergroup, radgroupreply do MySQL
         sql
 
-        # Lê atributos do grupo (radgroupreply via radusergroup)
-        # Injeta Mikrotik-Rate-Limit entre outros atributos de grupo
-
-        # Define o método de autenticação.
-        # Para Hotspot MikroTik com PAP:
-        if (!control:Auth-Type) {
-            update control {
-                Auth-Type := PAP
-            }
-        }
+        # Define Auth-Type = PAP se ainda não definido
+        # (MikroTik Hotspot usa PAP por padrão)
+        pap
     }
 
-    # ══════════════════════════════════════════════════════════════════════
-    # AUTHENTICATE — Verifica a senha
-    # ══════════════════════════════════════════════════════════════════════
+    # ── AUTHENTICATE ──────────────────────────────────────────────────────────
     authenticate {
-        # PAP: compara User-Password com Cleartext-Password
         Auth-Type PAP {
             pap
         }
-
-        # CHAP: para autenticação CHAP (MikroTik suporta ambos)
         Auth-Type CHAP {
             chap
         }
-
-        # MS-CHAP v2 (WPA Enterprise)
-        # Auth-Type MS-CHAP {
-        #     mschap
-        # }
     }
 
-    # ══════════════════════════════════════════════════════════════════════
-    # PREACCT — Pré-processamento do accounting
-    # ══════════════════════════════════════════════════════════════════════
+    # ── PREACCT ───────────────────────────────────────────────────────────────
     preacct {
         preprocess
         acct_unique
-        suffix
-        files
     }
 
-    # ══════════════════════════════════════════════════════════════════════
-    # ACCOUNTING — Registra sessões na tabela radacct
-    # ══════════════════════════════════════════════════════════════════════
+    # ── ACCOUNTING ────────────────────────────────────────────────────────────
     accounting {
-        detail
-        unix
-
-        # Grava no MySQL (tabela radacct)
-        sql
-
-        # Executa exec (para scripts externos, desabilite se não usar)
-        # exec
+        sql             # grava sessões na tabela radacct
     }
 
-    # ══════════════════════════════════════════════════════════════════════
-    # SESSION — Controle de sessões simultâneas (Simultaneous-Use)
-    # ══════════════════════════════════════════════════════════════════════
+    # ── SESSION (Simultaneous-Use) ────────────────────────────────────────────
     session {
         sql
     }
 
-    # ══════════════════════════════════════════════════════════════════════
-    # POST-AUTH — Log de autenticações (aceitas E rejeitadas)
-    # ══════════════════════════════════════════════════════════════════════
+    # ── POST-AUTH ─────────────────────────────────────────────────────────────
     post-auth {
-        # Grava em radpostauth
-        sql
+        sql             # grava em radpostauth
 
-        # Para autenticações rejeitadas
         Post-Auth-Type REJECT {
             sql
             attr_filter.access_reject
