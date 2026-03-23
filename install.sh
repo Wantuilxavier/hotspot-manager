@@ -260,9 +260,17 @@ install_mariadb() {
     systemctl enable --now mariadb
     success "MariaDB instalado e iniciado."
 
+    # No Debian, MariaDB usa unix_socket auth por padrão.
+    # Rodando como root do sistema, conecta sem -u e sem senha.
+    # Testa a conexão antes de prosseguir.
+    if ! mariadb --connect-timeout=10 -e "SELECT 1;" &>/dev/null; then
+        error "Não foi possível conectar ao MariaDB via unix_socket. Verifique: systemctl status mariadb"
+    fi
+
     # Hardening: define senha root, remove anônimos e banco test
-    mariadb -u root <<SQL
-ALTER USER 'root'@'localhost' IDENTIFIED BY '${MYSQL_ROOT_PASS}';
+    mariadb <<SQL
+-- Troca para autenticação por senha (necessário para scripts não-interativos)
+ALTER USER 'root'@'localhost' IDENTIFIED VIA mysql_native_password USING PASSWORD('${MYSQL_ROOT_PASS}');
 DELETE FROM mysql.user WHERE User='';
 DELETE FROM mysql.user WHERE User='root' AND Host NOT IN ('localhost','127.0.0.1','::1');
 DROP DATABASE IF EXISTS test;
@@ -270,7 +278,7 @@ DELETE FROM mysql.db WHERE Db='test' OR Db='test\\_%';
 FLUSH PRIVILEGES;
 SQL
 
-    # Cria banco e usuário do RADIUS
+    # Cria banco e usuário do RADIUS (agora com senha root definida)
     mariadb -u root -p"${MYSQL_ROOT_PASS}" <<SQL
 CREATE DATABASE IF NOT EXISTS radius
     CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
