@@ -90,10 +90,6 @@ collect_config() {
     read -rs DB_PASS; echo ""
     DB_PASS="${DB_PASS:-$(openssl rand -base64 18 | tr -dc 'a-zA-Z0-9' | head -c 22)}"
 
-    ask "Senha root do MariaDB [gera automático]:"
-    read -rs MYSQL_ROOT_PASS; echo ""
-    MYSQL_ROOT_PASS="${MYSQL_ROOT_PASS:-$(openssl rand -base64 18 | tr -dc 'a-zA-Z0-9' | head -c 22)}"
-
     # RADIUS secret
     ask "RADIUS Shared Secret [gera automático]:"
     read -r RADIUS_SECRET
@@ -266,7 +262,6 @@ install_mariadb() {
     local WAITED=0
     info "Aguardando MariaDB ficar pronto..."
     while [[ $WAITED -lt 30 ]]; do
-        # Localiza o socket em uso
         for s in /run/mysqld/mysqld.sock /var/run/mysqld/mysqld.sock /tmp/mysql.sock; do
             if [[ -S "$s" ]]; then
                 SOCKET="$s"
@@ -274,53 +269,18 @@ install_mariadb() {
             fi
         done
         sleep 1
-        WAITED=$(( WAITED + 1 ))   # (( WAITED++ )) exitaria com set -e quando WAITED=0
+        WAITED=$(( WAITED + 1 ))
     done
 
-    if [[ -z "$SOCKET" ]]; then
-        warn "Socket não encontrado nos caminhos padrão. Tentando via TCP..."
-        SOCKET=""
-    else
-        info "Socket encontrado em: ${SOCKET}"
-    fi
+    [[ -n "$SOCKET" ]] && info "Socket encontrado em: ${SOCKET}" \
+                       || error "Socket do MariaDB não encontrado. Verifique: journalctl -u mariadb -n 30"
 
-    # No Debian 13 + MariaDB 11.x o root não usa unix_socket por padrão.
-    # O Debian cria o usuário 'debian-sys-maint' em /etc/mysql/debian.cnf
-    # para operações de manutenção sem senha do root — usamos ele aqui.
-    local DEBIAN_CNF="/etc/mysql/debian.cnf"
-    local DB_CONNECT
-
-    if [[ -f "$DEBIAN_CNF" ]]; then
-        info "Usando credenciais de manutenção do Debian (${DEBIAN_CNF})..."
-        DB_CONNECT="mariadb --defaults-file=${DEBIAN_CNF} --connect-timeout=10"
-        [[ -n "$SOCKET" ]] && DB_CONNECT="mariadb --defaults-file=${DEBIAN_CNF} --connect-timeout=10 --socket=${SOCKET}"
-    else
-        warn "${DEBIAN_CNF} não encontrado — tentando unix_socket como root..."
-        DB_CONNECT="mariadb --connect-timeout=10"
-        [[ -n "$SOCKET" ]] && DB_CONNECT="mariadb --connect-timeout=10 --socket=${SOCKET}"
-    fi
-
-    local RETRIES=0
-    until $DB_CONNECT -e "SELECT 1;" &>/dev/null; do
-        RETRIES=$(( RETRIES + 1 ))
-        [[ $RETRIES -ge 10 ]] && error "MariaDB não responde após ${RETRIES} tentativas. Verifique: journalctl -u mariadb -n 30"
-        warn "Aguardando MariaDB... tentativa ${RETRIES}/10"
-        sleep 3
-    done
-    success "MariaDB pronto."
-
-    # Hardening: define senha para root e remove contas desnecessárias
-    $DB_CONNECT <<SQL
-ALTER USER 'root'@'localhost' IDENTIFIED VIA mysql_native_password USING PASSWORD('${MYSQL_ROOT_PASS}');
-DELETE FROM mysql.user WHERE User='';
-DELETE FROM mysql.user WHERE User='root' AND Host NOT IN ('localhost','127.0.0.1','::1');
-DROP DATABASE IF EXISTS test;
-DELETE FROM mysql.db WHERE Db='test' OR Db='test\\_%';
-FLUSH PRIVILEGES;
-SQL
-
-    # Cria banco e usuário do RADIUS (usa a senha root recém-definida)
-    mariadb -u root -p"${MYSQL_ROOT_PASS}" <<SQL
+    # No Debian, o MariaDB roda como o usuário de sistema 'mysql'.
+    # Esse usuário tem acesso implícito ao servidor sem senha.
+    # Usamos runuser para executar comandos como esse usuário — funciona
+    # em qualquer versão do Debian/MariaDB independente de unix_socket ou senha.
+    info "Criando banco 'radius' e usuário via runuser mysql..."
+    runuser -u mysql -- mariadb --socket="${SOCKET}" <<SQL
 CREATE DATABASE IF NOT EXISTS radius
     CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 CREATE USER IF NOT EXISTS 'radius'@'localhost' IDENTIFIED BY '${DB_PASS}';
@@ -332,7 +292,9 @@ SQL
     cat > /root/.hotspot_db.env <<EOF
 # Hotspot Manager — Credenciais MariaDB
 # Geradas em: $(date -Iseconds)
-MYSQL_ROOT_PASS=${MYSQL_ROOT_PASS}
+# Conectar manualmente: mariadb -u radius -p'${DB_PASS}' radius
+DB_USER=radius
+DB_NAME=radius
 DB_PASS=${DB_PASS}
 EOF
     chmod 600 /root/.hotspot_db.env
