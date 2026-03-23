@@ -150,7 +150,7 @@ update_system() {
                             -o Dpkg::Options::="--force-confold"
     apt-get install -y -qq \
         curl wget git unzip gnupg2 lsb-release ca-certificates \
-        software-properties-common apt-transport-https \
+        apt-transport-https \
         openssl ufw logrotate rsync acl
 
     success "Sistema atualizado."
@@ -162,15 +162,32 @@ update_system() {
 install_php() {
     step "2/9 — Instalando PHP 8.2"
 
-    # Repositório Sury — PHP moderno no Debian
-    if ! apt-cache show php8.2 &>/dev/null; then
-        curl -sSL https://packages.sury.org/php/apt.gpg \
-            | gpg --dearmor -o /usr/share/keyrings/sury-php.gpg
-        echo "deb [signed-by=/usr/share/keyrings/sury-php.gpg] \
-https://packages.sury.org/php/ $(lsb_release -cs) main" \
-            > /etc/apt/sources.list.d/sury-php.list
-        apt-get update -qq
-    fi
+    # Sempre (re)adiciona o repositório Sury para garantir que php8.2-fpm etc. existam.
+    # O pacote "php8.2" pode existir nos repos Debian, mas os pacotes individuais
+    # (php8.2-fpm, php8.2-mysql, etc.) só estão disponíveis via Sury.
+    info "Adicionando repositório Sury (deb.sury.org)..."
+
+    # Remove entrada antiga para evitar conflito
+    rm -f /etc/apt/sources.list.d/sury-php.list
+    rm -f /usr/share/keyrings/sury-php.gpg
+
+    # Importa a chave GPG
+    curl -sSfL https://packages.sury.org/php/apt.gpg \
+        | gpg --dearmor -o /usr/share/keyrings/sury-php.gpg \
+        || error "Falha ao baixar chave GPG do Sury. Verifique a conexão."
+
+    # Adiciona o repositório usando o codename do OS
+    local CODENAME
+    CODENAME=$(lsb_release -cs)
+    echo "deb [signed-by=/usr/share/keyrings/sury-php.gpg] https://packages.sury.org/php/ ${CODENAME} main" \
+        > /etc/apt/sources.list.d/sury-php.list
+
+    info "Repositório Sury adicionado para '${CODENAME}'. Atualizando índice..."
+    apt-get update -qq
+
+    # Confirma que php8.2-fpm está disponível antes de instalar
+    apt-cache show php8.2-fpm &>/dev/null \
+        || error "php8.2-fpm não encontrado mesmo após adicionar o repositório Sury. Verifique: apt-cache policy php8.2-fpm"
 
     apt-get install -y -qq \
         php8.2 php8.2-fpm php8.2-cli php8.2-common \
