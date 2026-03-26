@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # ==============================================================================
-#  Hotspot Manager — Script de Instalação Completa
+#  Hotspot Manager — Instalador / Atualizador  v2.0
 #  Alvo  : Debian 13 (Trixie) / Debian 12 (Bookworm)
-#  Uso   : bash install.sh          (execute como root)
+#  Uso   : bash install.sh   (execute como root)
+#  Modos : fresh | update  (detectado automaticamente)
 #  Repo  : https://github.com/Wantuilxavier/hotspot-manager
 # ==============================================================================
 
@@ -19,7 +20,6 @@ success() { echo -e "${GREEN}[OK]${NC}    $*"; }
 warn()    { echo -e "${YELLOW}[WARN]${NC}  $*"; }
 error()   { echo -e "${RED}[ERRO]${NC}  $*" >&2; exit 1; }
 step()    { echo -e "\n${BOLD}${CYAN}━━━ $* ━━━${NC}"; }
-ask()     { echo -e -n "${YELLOW}[?]${NC} $* "; }
 
 banner() {
 cat << 'EOF'
@@ -30,89 +30,105 @@ cat << 'EOF'
   ██╔══██║██║   ██║   ██║   ╚════██║██╔═══╝ ██║   ██║   ██║
   ██║  ██║╚██████╔╝   ██║   ███████║██║     ╚██████╔╝   ██║
   ╚═╝  ╚═╝ ╚═════╝    ╚═╝   ╚══════╝╚═╝      ╚═════╝    ╚═╝
-            MikroTik Hotspot Manager — Instalador v1.1
-              Debian 13 (Trixie) / Debian 12 (Bookworm)
-              Execução como root  |  github.com/Wantuilxavier
+        MikroTik Hotspot Manager — Instalador v2.0
+          Debian 13 (Trixie) / Debian 12 (Bookworm)
+          Execução como root  |  github.com/Wantuilxavier
 
 EOF
 }
 
 # ══════════════════════════════════════════════════════════════════════════════
+# CONSTANTES
+# ══════════════════════════════════════════════════════════════════════════════
+INSTALL_DIR="/var/www/hotspot-manager"
+WEB_SERVER="nginx"
+APP_PORT="80"
+APP_TZ="America/Sao_Paulo"
+MIKROTIK_IP="192.168.88.1"
+REPO_SSH="git@github.com:Wantuilxavier/hotspot-manager.git"
+REPO_HTTPS="https://github.com/Wantuilxavier/hotspot-manager.git"
+
+# Arquivos de estado (persistem entre execuções)
+STATE_DB="/root/.hotspot_db.env"
+STATE_RADIUS="/root/.hotspot_radius.env"
+STATE_ADMIN="/root/.hotspot_admin.env"
+CRED_FILE="/root/hotspot-manager-credentials.txt"
+
+# Modo de execução (definido em detect_mode)
+MODE="fresh"   # fresh | update
+
+# ══════════════════════════════════════════════════════════════════════════════
 # VERIFICAÇÕES INICIAIS
 # ══════════════════════════════════════════════════════════════════════════════
 check_root() {
-    [[ $EUID -eq 0 ]] || error "Este script deve ser executado como root. Use: bash $0"
+    [[ $EUID -eq 0 ]] || error "Execute como root: bash $0"
 }
 
 check_os() {
     [[ -f /etc/debian_version ]] \
-        || error "Sistema não suportado. Requer Debian 12 (Bookworm) ou 13 (Trixie)."
-
+        || error "Sistema não suportado. Requer Debian 12 ou 13."
     DEBIAN_VERSION=$(cut -d. -f1 /etc/debian_version)
     OS_CODENAME=$(lsb_release -cs 2>/dev/null || echo "unknown")
-    info "Debian ${DEBIAN_VERSION} (${OS_CODENAME}) detectado."
-
     [[ "$DEBIAN_VERSION" -ge 12 ]] \
-        || error "Requer Debian 12 ou superior. Versão atual: ${DEBIAN_VERSION}."
+        || error "Requer Debian 12+. Atual: ${DEBIAN_VERSION}."
+    info "Debian ${DEBIAN_VERSION} (${OS_CODENAME}) detectado."
 }
 
 check_internet() {
-    info "Verificando conexão com a internet..."
+    info "Verificando conectividade..."
     curl -sf --max-time 8 https://deb.debian.org > /dev/null \
-        || error "Sem acesso à internet. Verifique a conectividade."
+        || error "Sem acesso à internet."
     success "Internet disponível."
 }
 
 # ══════════════════════════════════════════════════════════════════════════════
-# CONFIGURAÇÃO AUTOMÁTICA
+# DETECÇÃO DE MODO + CREDENCIAIS
 # ══════════════════════════════════════════════════════════════════════════════
-collect_config() {
-    step "Configuração Automática"
+detect_mode() {
+    if [[ -d "${INSTALL_DIR}/.git" ]] && [[ -f "$STATE_DB" ]]; then
+        MODE="update"
+    else
+        MODE="fresh"
+    fi
+}
 
-    # Diretório de instalação
-    INSTALL_DIR="/var/www/hotspot-manager"
+load_or_generate_credentials() {
+    # Lê credenciais persistidas. Se não existirem (fresh install), gera novas.
+    # NUNCA gera novas senhas em modo update — isso causaria dessincronização
+    # entre o banco de dados já existente e o novo .env.
+    DB_PASS=""
+    RADIUS_SECRET=""
+    ADMIN_PASS=""
 
-    # Domínio / IP — detectado automaticamente
+    [[ -f "$STATE_DB" ]]     && DB_PASS="$(grep ^DB_PASS= "$STATE_DB" | cut -d= -f2)"
+    [[ -f "$STATE_RADIUS" ]] && RADIUS_SECRET="$(grep ^RADIUS_SECRET= "$STATE_RADIUS" | cut -d= -f2)"
+    [[ -f "$STATE_ADMIN" ]]  && ADMIN_PASS="$(grep ^ADMIN_PASS= "$STATE_ADMIN" | cut -d= -f2)"
+
+    [[ -n "$DB_PASS" ]]       || DB_PASS="$(openssl rand -base64 18 | tr -dc 'a-zA-Z0-9' | head -c 22)"
+    [[ -n "$RADIUS_SECRET" ]] || RADIUS_SECRET="$(openssl rand -base64 24 | tr -dc 'a-zA-Z0-9' | head -c 32)"
+    [[ -n "$ADMIN_PASS" ]]    || ADMIN_PASS="$(openssl rand -base64 18 | tr -dc 'a-zA-Z0-9' | head -c 20)"
+
     SERVER_IP=$(hostname -I | awk '{print $1}')
     APP_HOST="${SERVER_IP}"
+}
 
-    # Porta do web server
-    APP_PORT="80"
+collect_config() {
+    detect_mode
+    load_or_generate_credentials
 
-    # Banco de dados — senha gerada automaticamente
-    DB_PASS="$(openssl rand -base64 18 | tr -dc 'a-zA-Z0-9' | head -c 22)"
-
-    # RADIUS secret — gerado automaticamente
-    RADIUS_SECRET="$(openssl rand -base64 24 | tr -dc 'a-zA-Z0-9' | head -c 32)"
-
-    # IP do MikroTik — padrão (pode ser alterado no .env após a instalação)
-    MIKROTIK_IP="192.168.88.1"
-
-    # Web server
-    WEB_SERVER="nginx"
-
-    # Senha admin — gerada automaticamente (mín. 16 chars, maiúsculas + números + especiais)
-    ADMIN_PASS="$(openssl rand -base64 18 | tr -dc 'a-zA-Z0-9' | head -c 16)$(openssl rand -base64 6 | tr -dc '0-9' | head -c 4)"
-
-    # Fuso horário
-    APP_TZ="America/Sao_Paulo"
+    local mode_label
+    [[ "$MODE" == "update" ]] && mode_label="ATUALIZAÇÃO" || mode_label="INSTALAÇÃO NOVA"
 
     echo ""
-    echo -e "${BOLD}┌────────────────────────────────────────────────────┐"
-    echo -e "│         Configuração Gerada Automaticamente        │"
-    echo -e "├────────────────────────────────────────────────────┤"
-    echo -e "│ Diretório    : ${INSTALL_DIR}"
-    echo -e "│ URL          : http://${APP_HOST}:${APP_PORT}"
-    echo -e "│ Timezone     : ${APP_TZ}"
-    echo -e "│ MariaDB user : radius / [gerado automaticamente]"
-    echo -e "│ RADIUS secret: [gerado automaticamente]"
-    echo -e "│ MikroTik IP  : ${MIKROTIK_IP}"
-    echo -e "│ Web server   : ${WEB_SERVER}"
-    echo -e "│ Admin login  : admin@hotspot.local / [gerado automaticamente]"
-    echo -e "│ Execução     : root"
-    echo -e "└────────────────────────────────────────────────────┘${NC}"
+    echo -e "${BOLD}┌──────────────────────────────────────────────────────┐"
+    printf  "│  Modo     : %-40s│\n" "$mode_label"
+    printf  "│  Servidor : %-40s│\n" "${APP_HOST}:${APP_PORT}"
+    printf  "│  Dir      : %-40s│\n" "${INSTALL_DIR}"
+    printf  "│  MariaDB  : %-40s│\n" "radius / [credenciais em /root]"
+    printf  "│  Web      : %-40s│\n" "${WEB_SERVER}"
+    echo -e "└──────────────────────────────────────────────────────┘${NC}"
     echo ""
-    info "Instalação iniciando em 5 segundos... (Ctrl+C para cancelar)"
+    info "Iniciando em 5 segundos... (Ctrl+C para cancelar)"
     sleep 5
 }
 
@@ -124,12 +140,12 @@ update_system() {
     export DEBIAN_FRONTEND=noninteractive
 
     apt-get update -qq
-    apt-get upgrade -y -qq -o Dpkg::Options::="--force-confdef" \
-                            -o Dpkg::Options::="--force-confold"
+    apt-get upgrade -y -qq \
+        -o Dpkg::Options::="--force-confdef" \
+        -o Dpkg::Options::="--force-confold"
     apt-get install -y -qq \
         curl wget git unzip gnupg2 lsb-release ca-certificates \
-        apt-transport-https \
-        openssl ufw logrotate rsync acl
+        apt-transport-https openssl ufw logrotate rsync acl
 
     success "Sistema atualizado."
 }
@@ -138,34 +154,25 @@ update_system() {
 # PASSO 2 — PHP 8.2
 # ══════════════════════════════════════════════════════════════════════════════
 install_php() {
-    step "2/9 — Instalando PHP 8.2"
+    step "2/9 — PHP 8.2"
 
-    # Sempre (re)adiciona o repositório Sury para garantir que php8.2-fpm etc. existam.
-    # O pacote "php8.2" pode existir nos repos Debian, mas os pacotes individuais
-    # (php8.2-fpm, php8.2-mysql, etc.) só estão disponíveis via Sury.
-    info "Adicionando repositório Sury (deb.sury.org)..."
+    # Sempre (re)adiciona o repositório Sury — garante que php8.2-fpm exista
+    info "Configurando repositório Sury..."
+    rm -f /etc/apt/sources.list.d/sury-php.list \
+          /usr/share/keyrings/sury-php.gpg
 
-    # Remove entrada antiga para evitar conflito
-    rm -f /etc/apt/sources.list.d/sury-php.list
-    rm -f /usr/share/keyrings/sury-php.gpg
-
-    # Importa a chave GPG
     curl -sSfL https://packages.sury.org/php/apt.gpg \
         | gpg --dearmor -o /usr/share/keyrings/sury-php.gpg \
-        || error "Falha ao baixar chave GPG do Sury. Verifique a conexão."
+        || error "Falha ao baixar chave GPG do Sury."
 
-    # Adiciona o repositório usando o codename do OS
     local CODENAME
     CODENAME=$(lsb_release -cs)
     echo "deb [signed-by=/usr/share/keyrings/sury-php.gpg] https://packages.sury.org/php/ ${CODENAME} main" \
         > /etc/apt/sources.list.d/sury-php.list
 
-    info "Repositório Sury adicionado para '${CODENAME}'. Atualizando índice..."
     apt-get update -qq
-
-    # Confirma que php8.2-fpm está disponível antes de instalar
     apt-cache show php8.2-fpm &>/dev/null \
-        || error "php8.2-fpm não encontrado mesmo após adicionar o repositório Sury. Verifique: apt-cache policy php8.2-fpm"
+        || error "php8.2-fpm não encontrado. Verifique: apt-cache policy php8.2-fpm"
 
     apt-get install -y -qq \
         php8.2 php8.2-fpm php8.2-cli php8.2-common \
@@ -184,34 +191,25 @@ install_php() {
         sed -i "s|^;date.timezone.*|date.timezone = ${APP_TZ}|"       "$ini_file"
     done
 
-    # Corrige o pool www — PHP-FPM não permite workers como root (proteção
-    # hard-coded no código-fonte). Força www-data mesmo que uma execução
-    # anterior do script tenha gravado root no arquivo.
-    PHP_POOL="/etc/php/8.2/fpm/pool.d/www.conf"
-    sed -i 's/^user = .*/user = www-data/'              "$PHP_POOL"
-    sed -i 's/^group = .*/group = www-data/'            "$PHP_POOL"
+    # Pool FPM — PHP proíbe workers como root (proteção hard-coded)
+    local PHP_POOL="/etc/php/8.2/fpm/pool.d/www.conf"
+    [[ -f "$PHP_POOL" ]] || error "Pool config não encontrado: ${PHP_POOL}"
+    sed -i 's/^user = .*/user = www-data/'               "$PHP_POOL"
+    sed -i 's/^group = .*/group = www-data/'             "$PHP_POOL"
     sed -i 's/^listen\.owner.*/listen.owner = www-data/' "$PHP_POOL" 2>/dev/null || true
     sed -i 's/^listen\.group.*/listen.group = www-data/' "$PHP_POOL" 2>/dev/null || true
 
-    # Garante que o diretório do socket existe antes do start.
-    # No Debian 13 o systemd-tmpfiles pode não ter criado /run/php ainda.
+    # Garante o diretório do socket (pode não existir no Debian 13 fresh)
     mkdir -p /run/php
     for tmpfile in /usr/lib/tmpfiles.d/php8.2-fpm.conf /etc/tmpfiles.d/php8.2-fpm.conf; do
         [[ -f "$tmpfile" ]] && systemd-tmpfiles --create "$tmpfile" 2>/dev/null || true
     done
 
-    # Valida a configuração antes de tentar iniciar
-    info "Validando configuração do PHP-FPM..."
-    if ! php-fpm8.2 --test 2>&1; then
-        error "Configuração do PHP-FPM inválida (ver erros acima)."
-    fi
+    info "Validando configuração PHP-FPM..."
+    php-fpm8.2 --test 2>&1 || error "Configuração PHP-FPM inválida (ver acima)."
 
     systemctl enable php8.2-fpm
-    if ! systemctl start php8.2-fpm; then
-        warn "PHP-FPM falhou ao iniciar. Log do serviço:"
-        journalctl -u php8.2-fpm -n 30 --no-pager || true
-        error "PHP-FPM não iniciou. Verifique os erros acima."
-    fi
+    _service_restart php8.2-fpm
     success "PHP $(php -r 'echo PHP_VERSION;') instalado e configurado."
 }
 
@@ -219,19 +217,20 @@ install_php() {
 # PASSO 3 — COMPOSER
 # ══════════════════════════════════════════════════════════════════════════════
 install_composer() {
-    step "3/9 — Instalando Composer"
+    step "3/9 — Composer"
 
     if command -v composer &>/dev/null; then
-        success "Composer $(composer --version --no-ansi | awk '{print $3}') já instalado."
+        # Atualiza composer se já instalado
+        composer self-update --stable --no-interaction 2>/dev/null || true
+        success "Composer $(composer --version --no-ansi | awk '{print $3}') pronto."
         return
     fi
 
+    local EXPECTED_SIG ACTUAL_SIG
     EXPECTED_SIG="$(curl -sSL https://composer.github.io/installer.sig)"
     php -r "copy('https://getcomposer.org/installer', '/tmp/composer-setup.php');"
     ACTUAL_SIG="$(php -r "echo hash_file('sha384', '/tmp/composer-setup.php');")"
-
-    [[ "$EXPECTED_SIG" == "$ACTUAL_SIG" ]] \
-        || error "Checksum do instalador Composer inválido. Abortando."
+    [[ "$EXPECTED_SIG" == "$ACTUAL_SIG" ]] || error "Checksum Composer inválido."
 
     php /tmp/composer-setup.php --quiet --install-dir=/usr/local/bin --filename=composer
     rm -f /tmp/composer-setup.php
@@ -242,10 +241,10 @@ install_composer() {
 # PASSO 4 — MARIADB
 # ══════════════════════════════════════════════════════════════════════════════
 install_mariadb() {
-    step "4/9 — Instalando MariaDB 11.4"
+    step "4/9 — MariaDB 11.4"
 
-    # Repositório oficial MariaDB (LTS)
     if ! mariadbd --version 2>/dev/null | grep -q "11\."; then
+        info "Adicionando repositório MariaDB 11.4..."
         curl -sS https://downloads.mariadb.com/MariaDB/mariadb_repo_setup \
             | bash -s -- --mariadb-server-version="mariadb-11.4" \
                          --skip-maxscale --os-type=debian \
@@ -255,103 +254,206 @@ install_mariadb() {
 
     apt-get install -y -qq mariadb-server mariadb-client
     systemctl enable mariadb
-    if ! systemctl start mariadb; then
-        warn "MariaDB falhou ao iniciar. Log:"
-        journalctl -u mariadb -n 20 --no-pager || true
-        error "MariaDB não iniciou. Verifique os erros acima."
-    fi
-    success "MariaDB instalado."
+    _service_restart mariadb
 
-    # Aguarda o socket ficar disponível (até 30s)
-    local SOCKET=""
-    local WAITED=0
-    info "Aguardando MariaDB ficar pronto..."
+    # Aguarda o socket (até 30 s)
+    local SOCKET="" WAITED=0
+    info "Aguardando MariaDB..."
     while [[ $WAITED -lt 30 ]]; do
         for s in /run/mysqld/mysqld.sock /var/run/mysqld/mysqld.sock /tmp/mysql.sock; do
-            if [[ -S "$s" ]]; then
-                SOCKET="$s"
-                break 2
-            fi
+            [[ -S "$s" ]] && { SOCKET="$s"; break 2; }
         done
-        sleep 1
-        WAITED=$(( WAITED + 1 ))
+        sleep 1; WAITED=$(( WAITED + 1 ))
     done
+    [[ -n "$SOCKET" ]] || error "Socket MariaDB não encontrado. Ver: journalctl -u mariadb -n 30"
+    info "Socket: ${SOCKET}"
 
-    [[ -n "$SOCKET" ]] && info "Socket encontrado em: ${SOCKET}" \
-                       || error "Socket do MariaDB não encontrado. Verifique: journalctl -u mariadb -n 30"
-
-    # No Debian, o MariaDB roda como o usuário de sistema 'mysql'.
-    # Esse usuário tem acesso implícito ao servidor sem senha.
-    # Usamos runuser para executar comandos como esse usuário — funciona
-    # em qualquer versão do Debian/MariaDB independente de unix_socket ou senha.
-    info "Criando banco 'radius' e usuário via runuser mysql..."
+    # Cria banco + usuário (CREATE OR REPLACE — sempre sincroniza a senha)
     runuser -u mysql -- mariadb --socket="${SOCKET}" <<SQL
 CREATE DATABASE IF NOT EXISTS radius
     CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
-CREATE USER IF NOT EXISTS 'radius'@'localhost' IDENTIFIED BY '${DB_PASS}';
+CREATE OR REPLACE USER 'radius'@'localhost' IDENTIFIED BY '${DB_PASS}';
 GRANT ALL PRIVILEGES ON radius.* TO 'radius'@'localhost';
 FLUSH PRIVILEGES;
 SQL
 
-    # Persiste credenciais com permissão restrita
-    cat > /root/.hotspot_db.env <<EOF
-# Hotspot Manager — Credenciais MariaDB
-# Geradas em: $(date -Iseconds)
-# Conectar manualmente: mariadb -u radius -p'${DB_PASS}' radius
-DB_USER=radius
-DB_NAME=radius
-DB_PASS=${DB_PASS}
-EOF
-    chmod 600 /root/.hotspot_db.env
-    success "Banco 'radius' criado. Credenciais em /root/.hotspot_db.env"
+    # Confirma autenticação
+    mariadb -u radius -p"${DB_PASS}" -h 127.0.0.1 radius -e "SELECT 1;" &>/dev/null \
+        || error "Autenticação falhou após CREATE OR REPLACE USER. Senha: ${DB_PASS}"
+    success "Usuário 'radius' autenticado com sucesso."
+
+    # Persiste credenciais
+    printf '# Hotspot Manager — MariaDB\nDB_USER=radius\nDB_NAME=radius\nDB_PASS=%s\n' \
+        "${DB_PASS}" > "$STATE_DB"
+    chmod 600 "$STATE_DB"
+
+    # Atualiza .my.cnf (usado pelo cron)
+    cat > /root/.my.cnf <<MYCNF
+[client]
+user=radius
+password=${DB_PASS}
+host=127.0.0.1
+MYCNF
+    chmod 600 /root/.my.cnf
+
+    success "Banco 'radius' pronto."
 }
 
 # ══════════════════════════════════════════════════════════════════════════════
 # PASSO 5 — APP LARAVEL
 # ══════════════════════════════════════════════════════════════════════════════
 install_app() {
-    step "5/9 — Instalando a aplicação Laravel"
+    step "5/9 — Aplicação Laravel (modo: ${MODE})"
 
-    # Clona ou atualiza o repositório
-    # Usa SSH (git@github.com) — mesmo protocolo do push, sem autenticação interativa.
-    # Pré-requisito: a chave SSH do servidor deve estar adicionada ao GitHub.
-    local REPO_SSH="git@github.com:Wantuilxavier/hotspot-manager.git"
-    local REPO_HTTPS="https://github.com/Wantuilxavier/hotspot-manager.git"
-
-    if [[ -d "${INSTALL_DIR}/.git" ]]; then
-        info "Repositório já existe em ${INSTALL_DIR}. Atualizando..."
-        # Descarta mudanças locais (ex: install.sh modificado no servidor)
-        # antes de atualizar — o repositório remoto é sempre autoritativo.
-        git -C "$INSTALL_DIR" reset --hard HEAD
-        git -C "$INSTALL_DIR" clean -fd --exclude=".env" 2>/dev/null || true
-        git -C "$INSTALL_DIR" pull --ff-only
+    # ── Git ──────────────────────────────────────────────────────────────────
+    if [[ "$MODE" == "fresh" ]]; then
+        _git_clone
     else
-        info "Clonando repositório via SSH..."
-
-        # Garante que o fingerprint do GitHub está aceito (evita prompt interativo)
-        mkdir -p /root/.ssh
-        ssh-keyscan -H github.com >> /root/.ssh/known_hosts 2>/dev/null
-
-        if GIT_SSH_COMMAND="ssh -o BatchMode=yes" git clone --depth=1 "$REPO_SSH" "$INSTALL_DIR" 2>/dev/null; then
-            success "Repositório clonado via SSH."
-        else
-            warn "Clone SSH falhou. Tentando HTTPS (funciona apenas se o repositório for público)..."
-            GIT_TERMINAL_PROMPT=0 git clone --depth=1 "$REPO_HTTPS" "$INSTALL_DIR" \
-                || error "Falha ao clonar o repositório.
-
-  Opção 1 — Torne o repositório público no GitHub:
-    https://github.com/Wantuilxavier/hotspot-manager/settings
-
-  Opção 2 — Adicione a chave SSH deste servidor ao GitHub:
-    Chave pública: $(cat /root/.ssh/id_ed25519.pub 2>/dev/null || cat /root/.ssh/id_rsa.pub 2>/dev/null || echo '[nenhuma chave encontrada — gere com: ssh-keygen -t ed25519]')
-    Adicionar em: https://github.com/settings/ssh/new"
-        fi
+        _git_update
     fi
 
     cd "$INSTALL_DIR"
 
-    # ── .env ────────────────────────────────────────────────────────────────
-    cat > .env <<EOF
+    # ── Diretórios obrigatórios do Laravel ───────────────────────────────────
+    # Podem não existir no repo (.gitignore) — causam 500 se ausentes
+    mkdir -p storage/framework/{sessions,cache/data,views} \
+             storage/{app/public,logs} \
+             bootstrap/cache
+
+    # ── .env ─────────────────────────────────────────────────────────────────
+    if [[ "$MODE" == "fresh" ]]; then
+        _env_create
+    else
+        _env_sync   # Atualiza apenas as chaves gerenciadas pelo instalador
+    fi
+
+    # ── Dependências ─────────────────────────────────────────────────────────
+    info "Instalando/atualizando dependências Composer..."
+    COMPOSER_ALLOW_SUPERUSER=1 composer install \
+        --no-dev --optimize-autoloader --no-interaction --quiet --no-scripts
+    success "Dependências prontas."
+
+    # ── APP_KEY ──────────────────────────────────────────────────────────────
+    grep -q "^APP_KEY=" .env || echo "APP_KEY=" >> .env
+
+    if ! grep -q "^APP_KEY=base64:" .env; then
+        # Primeira vez ou key:generate falhou — gera manualmente
+        local GEN_KEY="base64:$(openssl rand -base64 32)"
+        sed -i "s|^APP_KEY=.*|APP_KEY=${GEN_KEY}|" .env
+    fi
+
+    php artisan key:generate --force --ansi 2>&1 || true
+
+    grep -q "^APP_KEY=base64:" .env \
+        || error "Falha ao definir APP_KEY. Verifique permissões do .env."
+    success "APP_KEY configurada."
+
+    # ── Package discover ──────────────────────────────────────────────────────
+    php artisan package:discover --ansi
+    success "Package discovery concluído."
+
+    # ── Limpa cache antigo (credenciais antigas no config cache causam 403) ──
+    php artisan optimize:clear --ansi 2>/dev/null \
+        || rm -f bootstrap/cache/config.php \
+                 bootstrap/cache/routes*.php \
+                 bootstrap/cache/packages.php \
+                 bootstrap/cache/services.php
+
+    # ── Migrations ───────────────────────────────────────────────────────────
+    # Sempre seguro: migrate é idempotente (aplica apenas migrations pendentes)
+    info "Executando migrations..."
+    php artisan migrate --force --ansi
+    success "Migrations concluídas."
+
+    # ── Seed — apenas na instalação inicial ──────────────────────────────────
+    if [[ "$MODE" == "fresh" ]]; then
+        info "Populando dados iniciais..."
+        php artisan db:seed --force --ansi
+        success "Seed concluído."
+    else
+        info "Modo update — seed ignorado (dados existentes preservados)."
+    fi
+
+    # ── Senha do admin ────────────────────────────────────────────────────────
+    php artisan tinker --execute="\
+        \App\Models\AdminUser::where('email','admin@hotspot.local')
+            ->update(['password'=>bcrypt('${ADMIN_PASS}')]);
+    " 2>/dev/null \
+        && success "Senha do admin atualizada." \
+        || warn "Atualize a senha admin manualmente no painel."
+
+    printf 'ADMIN_PASS=%s\n' "${ADMIN_PASS}" > "$STATE_ADMIN"
+    chmod 600 "$STATE_ADMIN"
+
+    # ── Permissões ────────────────────────────────────────────────────────────
+    # Aplicadas ANTES do config:cache — os arquivos de cache nascem com
+    # owner www-data (o mesmo usuário que o PHP-FPM usa em runtime)
+    chown -R root:www-data "$INSTALL_DIR"
+    find "$INSTALL_DIR" -type f -exec chmod 640 {} \;
+    find "$INSTALL_DIR" -type d -exec chmod 750 {} \;
+    chown -R www-data:www-data "${INSTALL_DIR}/storage" \
+                               "${INSTALL_DIR}/bootstrap/cache"
+    chmod -R 775 "${INSTALL_DIR}/storage" "${INSTALL_DIR}/bootstrap/cache"
+    chmod -R 755 "${INSTALL_DIR}/public"
+    chmod 700    "${INSTALL_DIR}/install.sh"
+    success "Permissões configuradas."
+
+    # ── Cache de produção (como www-data para garantir ownership correto) ─────
+    # runuser em vez de sudo — sudo pode não estar instalado no Debian minimal
+    runuser -u www-data -- php artisan config:cache
+    runuser -u www-data -- php artisan route:cache
+    runuser -u www-data -- php artisan view:cache
+    success "Cache de produção gerado."
+}
+
+# ── Helpers de git ────────────────────────────────────────────────────────────
+_git_clone() {
+    info "Clonando repositório..."
+    mkdir -p /root/.ssh
+    ssh-keyscan -H github.com >> /root/.ssh/known_hosts 2>/dev/null || true
+
+    if GIT_SSH_COMMAND="ssh -o BatchMode=yes" \
+       git clone --depth=1 "$REPO_SSH" "$INSTALL_DIR" 2>/dev/null; then
+        success "Clonado via SSH."
+    else
+        warn "SSH falhou. Tentando HTTPS..."
+        GIT_TERMINAL_PROMPT=0 git clone --depth=1 "$REPO_HTTPS" "$INSTALL_DIR" \
+            || error "Falha ao clonar. Verifique acesso ao repositório:
+  SSH : adicione a chave do servidor em https://github.com/settings/ssh/new
+        Chave: $(cat /root/.ssh/id_ed25519.pub 2>/dev/null \
+                 || cat /root/.ssh/id_rsa.pub 2>/dev/null \
+                 || echo '[gere com: ssh-keygen -t ed25519]')
+  HTTPS: torne o repositório público em https://github.com/Wantuilxavier/hotspot-manager/settings"
+    fi
+}
+
+_git_update() {
+    info "Atualizando repositório para a versão mais recente..."
+    # fetch + reset garante que o servidor fique idêntico ao repositório remoto,
+    # independente de divergências locais (install.sh modificado, etc.)
+    git -C "$INSTALL_DIR" fetch origin --prune 2>/dev/null \
+        || { warn "fetch SSH falhou. Tentando HTTPS...";
+             git -C "$INSTALL_DIR" remote set-url origin "$REPO_HTTPS" 2>/dev/null || true
+             git -C "$INSTALL_DIR" fetch origin --prune; }
+
+    local REMOTE_BRANCH
+    REMOTE_BRANCH=$(git -C "$INSTALL_DIR" remote show origin 2>/dev/null \
+                    | grep "HEAD branch" | awk '{print $NF}')
+    REMOTE_BRANCH="${REMOTE_BRANCH:-main}"
+
+    git -C "$INSTALL_DIR" reset --hard "origin/${REMOTE_BRANCH}"
+    # Remove arquivos não rastreados exceto .env (contém credenciais)
+    git -C "$INSTALL_DIR" clean -fd --exclude=".env" 2>/dev/null || true
+
+    local NEW_HASH
+    NEW_HASH=$(git -C "$INSTALL_DIR" rev-parse --short HEAD)
+    success "Repositório atualizado → ${NEW_HASH} (${REMOTE_BRANCH})."
+}
+
+# ── Helpers de .env ───────────────────────────────────────────────────────────
+_env_create() {
+    info "Criando .env..."
+    cat > "${INSTALL_DIR}/.env" <<ENVEOF
 APP_NAME="Hotspot Manager"
 APP_ENV=production
 APP_KEY=
@@ -390,120 +492,104 @@ QUEUE_CONNECTION=sync
 MAIL_MAILER=log
 MAIL_FROM_ADDRESS="hotspot@${APP_HOST}"
 MAIL_FROM_NAME="Hotspot Manager"
-EOF
+ENVEOF
+    success ".env criado."
+}
 
-    # ── Dependências ────────────────────────────────────────────────────────
-    # --no-scripts evita que package:discover rode antes do APP_KEY existir,
-    # causando falha no bootstrap do Laravel durante o composer install.
-    info "Instalando dependências PHP via Composer..."
-    COMPOSER_ALLOW_SUPERUSER=1 composer install \
-        --no-dev --optimize-autoloader --no-interaction --quiet --no-scripts
-    success "Dependências instaladas."
+_env_sync() {
+    # Em modo update, não recria o .env do zero — o usuário pode ter
+    # personalizado valores (ex: MIKROTIK_PASS, MAIL_*, etc.).
+    # Sincroniza apenas as chaves gerenciadas pelo instalador.
+    info "Sincronizando valores do .env..."
 
-    # ── Chave (deve vir antes de qualquer artisan command) ───────────────────
-    php artisan key:generate --force --ansi
-    success "APP_KEY gerada."
+    local ENV_FILE="${INSTALL_DIR}/.env"
 
-    # ── Package discover (agora que o APP_KEY existe) ────────────────────────
-    php artisan package:discover --ansi
-    success "Package discovery concluído."
-
-    # ── Banco ───────────────────────────────────────────────────────────────
-    info "Executando migrations (criando schema RADIUS)..."
-    php artisan migrate --force --ansi
-    success "Migrations concluídas."
-
-    info "Populando dados iniciais (planos e admin)..."
-    php artisan db:seed --force --ansi
-    success "Seed concluído."
-
-    # Atualiza senha do admin se foi personalizada
-    if [[ "$ADMIN_PASS" != "Admin@123" ]]; then
-        php artisan tinker --execute="\
-            \App\Models\AdminUser::where('email','admin@hotspot.local')
-                ->update(['password'=>bcrypt('${ADMIN_PASS}')]);
-        " 2>/dev/null && success "Senha do admin atualizada." \
-                       || warn "Atualize a senha do admin manualmente no painel."
+    # Cria o .env se não existir (ex: primeiro update após instalação manual)
+    if [[ ! -f "$ENV_FILE" ]]; then
+        warn ".env não encontrado — criando a partir do template."
+        _env_create
+        return
     fi
 
-    # ── Cache de produção ────────────────────────────────────────────────────
-    php artisan config:cache
-    php artisan route:cache
-    php artisan view:cache
-    success "Cache de produção gerado."
+    _env_set "DB_PASSWORD"    "${DB_PASS}"
+    _env_set "RADIUS_SECRET"  "${RADIUS_SECRET}"
+    _env_set "APP_URL"        "http://${APP_HOST}:${APP_PORT}"
+    _env_set "APP_TIMEZONE"   "${APP_TZ}"
 
-    # ── Permissões ──────────────────────────────────────────────────────────
-    # O FPM roda como www-data, então storage/ e bootstrap/cache/ precisam
-    # ser graváveis por www-data. O restante permanece de propriedade do root.
-    chown -R root:www-data "$INSTALL_DIR"
-    find "$INSTALL_DIR" -type f -exec chmod 640 {} \;
-    find "$INSTALL_DIR" -type d -exec chmod 750 {} \;
-    # storage/ e bootstrap/cache/ precisam de escrita pelo www-data
-    chown -R www-data:www-data "${INSTALL_DIR}/storage" "${INSTALL_DIR}/bootstrap/cache"
-    chmod -R 775 "${INSTALL_DIR}/storage" "${INSTALL_DIR}/bootstrap/cache"
-    # public/ precisa ser legível pelo Nginx (www-data)
-    chmod -R 755 "${INSTALL_DIR}/public"
-    # install.sh executável pelo root
-    chmod 700 "${INSTALL_DIR}/install.sh"
-    success "Permissões configuradas (app: root:www-data | storage: www-data)."
+    success ".env sincronizado."
+}
+
+# Atualiza ou insere uma chave no .env
+_env_set() {
+    local KEY="$1" VAL="$2"
+    local ENV_FILE="${INSTALL_DIR}/.env"
+    if grep -q "^${KEY}=" "$ENV_FILE"; then
+        sed -i "s|^${KEY}=.*|${KEY}=${VAL}|" "$ENV_FILE"
+    else
+        echo "${KEY}=${VAL}" >> "$ENV_FILE"
+    fi
 }
 
 # ══════════════════════════════════════════════════════════════════════════════
 # PASSO 6 — FREERADIUS 3
 # ══════════════════════════════════════════════════════════════════════════════
 install_freeradius() {
-    step "6/9 — Instalando FreeRADIUS 3"
+    step "6/9 — FreeRADIUS 3"
 
     apt-get install -y -qq \
         freeradius freeradius-mysql freeradius-utils freeradius-common
 
-    FR_DIR="/etc/freeradius/3.0"
+    local FR_DIR="/etc/freeradius/3.0"
+    local FR_VERSION
     FR_VERSION=$(freeradius -v 2>&1 | grep -oP '[\d]+\.[\d]+\.[\d]+' | head -1 || echo "3.x")
-    success "FreeRADIUS ${FR_VERSION} instalado."
+    success "FreeRADIUS ${FR_VERSION}."
 
     # ── Dicionário MikroTik ────────────────────────────────────────────────
     [[ -f "${INSTALL_DIR}/freeradius/dictionary.mikrotik" ]] \
-        || error "Arquivo não encontrado: ${INSTALL_DIR}/freeradius/dictionary.mikrotik"
-    cp "${INSTALL_DIR}/freeradius/dictionary.mikrotik" /usr/share/freeradius/dictionary.mikrotik
+        || error "Arquivo ausente: ${INSTALL_DIR}/freeradius/dictionary.mikrotik"
+    cp "${INSTALL_DIR}/freeradius/dictionary.mikrotik" \
+       /usr/share/freeradius/dictionary.mikrotik
     grep -q "dictionary.mikrotik" /usr/share/freeradius/dictionary \
         || echo '$INCLUDE dictionary.mikrotik' >> /usr/share/freeradius/dictionary
     success "Dicionário MikroTik instalado."
 
     # ── Módulo SQL ─────────────────────────────────────────────────────────
     [[ -f "${INSTALL_DIR}/freeradius/mods-available/sql" ]] \
-        || error "Arquivo não encontrado: ${INSTALL_DIR}/freeradius/mods-available/sql"
-    cp "${INSTALL_DIR}/freeradius/mods-available/sql" "${FR_DIR}/mods-available/sql"
-    # Substitui a senha padrão "secret" pela senha gerada
-    sed -i "s|password = \"secret\"|password = \"${DB_PASS}\"|g" \
+        || error "Arquivo ausente: ${INSTALL_DIR}/freeradius/mods-available/sql"
+    cp "${INSTALL_DIR}/freeradius/mods-available/sql" \
+       "${FR_DIR}/mods-available/sql"
+
+    # Substitui qualquer valor de password = "..." pela senha atual.
+    # O padrão cobre tanto a instalação inicial ("secret") quanto
+    # re-execuções (senha anterior já gravada no arquivo).
+    sed -i "s|password = \"[^\"]*\"|password = \"${DB_PASS}\"|g" \
         "${FR_DIR}/mods-available/sql"
 
     ln -sf "${FR_DIR}/mods-available/sql" "${FR_DIR}/mods-enabled/sql" 2>/dev/null || true
     success "Módulo SQL configurado."
 
     # ── Módulos necessários ────────────────────────────────────────────────
-    # Habilita módulos usados pelo virtual server hotspot
     for mod in preprocess pap chap acct_unique attr_filter; do
-        if [[ -f "${FR_DIR}/mods-available/${mod}" ]]; then
+        [[ -f "${FR_DIR}/mods-available/${mod}" ]] && \
             ln -sf "${FR_DIR}/mods-available/${mod}" \
                    "${FR_DIR}/mods-enabled/${mod}" 2>/dev/null || true
-        fi
     done
-    success "Módulos FreeRADIUS habilitados."
+    success "Módulos habilitados."
 
     # ── Virtual server hotspot ─────────────────────────────────────────────
     [[ -f "${INSTALL_DIR}/freeradius/sites-available/hotspot" ]] \
-        || error "Arquivo não encontrado: ${INSTALL_DIR}/freeradius/sites-available/hotspot"
+        || error "Arquivo ausente: ${INSTALL_DIR}/freeradius/sites-available/hotspot"
     cp "${INSTALL_DIR}/freeradius/sites-available/hotspot" \
        "${FR_DIR}/sites-available/hotspot"
-    ln -sf "${FR_DIR}/sites-available/hotspot" "${FR_DIR}/sites-enabled/hotspot" 2>/dev/null || true
+    ln -sf "${FR_DIR}/sites-available/hotspot" \
+           "${FR_DIR}/sites-enabled/hotspot" 2>/dev/null || true
     success "Virtual server 'hotspot' ativado."
 
-    # ── clients.conf ───────────────────────────────────────────────────────
+    # ── clients.conf — adiciona se ainda não existir ───────────────────────
     if ! grep -q "client mikrotik_hotspot" "${FR_DIR}/clients.conf"; then
         cat >> "${FR_DIR}/clients.conf" <<EOF
 
-# ── Adicionado pelo instalador Hotspot Manager em $(date -Iseconds) ──
-
+# ── Hotspot Manager — adicionado em $(date -Iseconds) ──
 client mikrotik_hotspot {
     ipaddr    = ${MIKROTIK_IP}
     secret    = ${RADIUS_SECRET}
@@ -511,7 +597,6 @@ client mikrotik_hotspot {
     nastype   = other
     require_message_authenticator = no
 }
-
 client localhost_radtest {
     ipaddr    = 127.0.0.1
     secret    = ${RADIUS_SECRET}
@@ -519,60 +604,52 @@ client localhost_radtest {
 }
 EOF
         success "MikroTik (${MIKROTIK_IP}) adicionado ao clients.conf."
+    else
+        # Em update, sincroniza o secret (pode ter mudado)
+        # Substitui o bloco client mikrotik_hotspot existente
+        sed -i "/client mikrotik_hotspot/,/^}/ s|secret\s*=.*|secret    = ${RADIUS_SECRET}|" \
+            "${FR_DIR}/clients.conf" 2>/dev/null || true
+        sed -i "/client localhost_radtest/,/^}/ s|secret\s*=.*|secret    = ${RADIUS_SECRET}|" \
+            "${FR_DIR}/clients.conf" 2>/dev/null || true
+        info "clients.conf: secret sincronizado."
     fi
 
     # ── Permissões ─────────────────────────────────────────────────────────
     chown -R freerad:freerad "${FR_DIR}"
 
-    # ── Valida configuração antes de iniciar ────────────────────────────────
+    # ── Valida e reinicia ──────────────────────────────────────────────────
     local FR_CHECK
     FR_CHECK=$(freeradius -XC 2>&1) || true
 
     if echo "$FR_CHECK" | grep -qi "error"; then
-        warn "FreeRADIUS detectou erros de configuração:"
+        warn "FreeRADIUS reportou erros:"
         echo "$FR_CHECK" | grep -i "error" | head -10
-        warn "Para debug completo rode: freeradius -X"
-        warn "O script continua — corrija o FreeRADIUS manualmente após a instalação."
+        warn "Corrija e rode: systemctl restart freeradius"
     else
         systemctl enable freeradius
-        systemctl restart freeradius \
-            && success "FreeRADIUS iniciado com sucesso." \
-            || {
-                warn "FreeRADIUS falhou ao iniciar. Saída do journalctl:"
-                journalctl -u freeradius -n 20 --no-pager || true
-                warn "Corrija e rode: systemctl restart freeradius"
-            }
+        _service_restart freeradius
+        success "FreeRADIUS iniciado."
     fi
 
-    # Salva secret
-    cat > /root/.hotspot_radius.env <<EOF
-# Hotspot Manager — RADIUS
-# Geradas em: $(date -Iseconds)
-RADIUS_SECRET=${RADIUS_SECRET}
-MIKROTIK_IP=${MIKROTIK_IP}
-
-# Cole no RouterOS:
-# /radius add service=hotspot address=$(hostname -I | awk '{print $1}') secret=${RADIUS_SECRET}
-EOF
-    chmod 600 /root/.hotspot_radius.env
-    success "RADIUS secret salvo em /root/.hotspot_radius.env"
+    # Persiste secret
+    printf '# Hotspot Manager — RADIUS\nRADIUS_SECRET=%s\nMIKROTIK_IP=%s\n' \
+        "${RADIUS_SECRET}" "${MIKROTIK_IP}" > "$STATE_RADIUS"
+    chmod 600 "$STATE_RADIUS"
 }
 
 # ══════════════════════════════════════════════════════════════════════════════
 # PASSO 7 — WEB SERVER
 # ══════════════════════════════════════════════════════════════════════════════
 install_webserver() {
-    step "7/9 — Configurando ${WEB_SERVER}"
-    [[ "$WEB_SERVER" == "nginx" ]] && setup_nginx || setup_apache
+    step "7/9 — ${WEB_SERVER}"
+    [[ "$WEB_SERVER" == "nginx" ]] && _setup_nginx || _setup_apache
 }
 
-setup_nginx() {
+_setup_nginx() {
     apt-get install -y -qq nginx
 
     cat > /etc/nginx/sites-available/hotspot-manager <<EOF
-# Hotspot Manager — Nginx
-# Gerado em: $(date -Iseconds)
-
+# Hotspot Manager — Nginx  (gerado em $(date -Iseconds))
 server {
     listen ${APP_PORT};
     listen [::]:${APP_PORT};
@@ -581,13 +658,11 @@ server {
     root ${INSTALL_DIR}/public;
     index index.php index.html;
 
-    # Segurança
     add_header X-Frame-Options "SAMEORIGIN" always;
     add_header X-Content-Type-Options "nosniff" always;
     add_header Referrer-Policy "strict-origin-when-cross-origin" always;
     server_tokens off;
 
-    # Logs
     access_log /var/log/nginx/hotspot-manager.access.log;
     error_log  /var/log/nginx/hotspot-manager.error.log warn;
 
@@ -595,18 +670,16 @@ server {
         try_files \$uri \$uri/ /index.php?\$query_string;
     }
 
-    location ~ \.php$ {
+    location ~ \.php\$ {
         fastcgi_pass   unix:/run/php/php8.2-fpm.sock;
         fastcgi_param  SCRIPT_FILENAME \$realpath_root\$fastcgi_script_name;
         include        fastcgi_params;
         fastcgi_read_timeout 60;
     }
 
-    location ~ /\.(?!well-known).* {
-        deny all;
-    }
+    location ~ /\.(?!well-known).* { deny all; }
 
-    location ~* \.(css|js|jpg|jpeg|png|gif|ico|woff|woff2|svg)$ {
+    location ~* \.(css|js|jpg|jpeg|png|gif|ico|woff|woff2|svg)\$ {
         expires 30d;
         add_header Cache-Control "public, immutable";
     }
@@ -619,27 +692,18 @@ EOF
            /etc/nginx/sites-enabled/hotspot-manager
     rm -f /etc/nginx/sites-enabled/default
 
-    if ! nginx -t 2>&1; then
-        error "Configuração do Nginx inválida (ver erros acima)."
-    fi
+    nginx -t 2>&1 || error "Configuração Nginx inválida (ver acima)."
     systemctl enable nginx
-    if ! systemctl start nginx; then
-        warn "Nginx falhou ao iniciar. Log:"
-        journalctl -u nginx -n 20 --no-pager || true
-        error "Nginx não iniciou. Verifique os erros acima."
-    fi
-    systemctl reload nginx || true
-    success "Nginx configurado na porta ${APP_PORT}."
+    _service_restart nginx
+    success "Nginx na porta ${APP_PORT}."
 }
 
-setup_apache() {
+_setup_apache() {
     apt-get install -y -qq apache2 libapache2-mod-php8.2
     a2enmod rewrite php8.2 headers deflate
 
     cat > /etc/apache2/sites-available/hotspot-manager.conf <<EOF
-# Hotspot Manager — Apache2
-# Gerado em: $(date -Iseconds)
-
+# Hotspot Manager — Apache2  (gerado em $(date -Iseconds))
 <VirtualHost *:${APP_PORT}>
     ServerName  ${APP_HOST}
     DocumentRoot ${INSTALL_DIR}/public
@@ -660,55 +724,35 @@ setup_apache() {
 </VirtualHost>
 EOF
 
-    # Ajusta porta se não for 80
-    if [[ "$APP_PORT" != "80" ]]; then
-        grep -q "Listen ${APP_PORT}" /etc/apache2/ports.conf \
-            || echo "Listen ${APP_PORT}" >> /etc/apache2/ports.conf
-    fi
+    [[ "$APP_PORT" != "80" ]] && \
+        { grep -q "Listen ${APP_PORT}" /etc/apache2/ports.conf \
+            || echo "Listen ${APP_PORT}" >> /etc/apache2/ports.conf; }
 
     a2ensite hotspot-manager.conf
     a2dissite 000-default.conf 2>/dev/null || true
-    if ! apache2ctl configtest 2>&1; then
-        error "Configuração do Apache2 inválida (ver erros acima)."
-    fi
+    apache2ctl configtest 2>&1 || error "Configuração Apache2 inválida (ver acima)."
     systemctl enable apache2
-    if ! systemctl start apache2; then
-        warn "Apache2 falhou ao iniciar. Log:"
-        journalctl -u apache2 -n 20 --no-pager || true
-        error "Apache2 não iniciou. Verifique os erros acima."
-    fi
-    systemctl reload apache2 || true
-    success "Apache2 configurado na porta ${APP_PORT}."
+    _service_restart apache2
+    success "Apache2 na porta ${APP_PORT}."
 }
 
 # ══════════════════════════════════════════════════════════════════════════════
-# PASSO 8 — FIREWALL (UFW)
+# PASSO 8 — FIREWALL
 # ══════════════════════════════════════════════════════════════════════════════
 configure_firewall() {
-    step "8/9 — Configurando Firewall (UFW)"
+    step "8/9 — Firewall (UFW)"
 
     ufw --force reset
     ufw default deny incoming
     ufw default allow outgoing
-
-    # SSH — crítico: não perder acesso
-    ufw allow 22/tcp comment "SSH"
-
-    # HTTP / HTTPS
-    [[ "$APP_PORT" != "80" ]] && ufw allow 80/tcp  comment "HTTP"
+    ufw allow 22/tcp           comment "SSH"
+    [[ "$APP_PORT" != "80" ]] && ufw allow 80/tcp comment "HTTP"
     ufw allow "${APP_PORT}/tcp" comment "Hotspot Manager"
-    ufw allow 443/tcp comment "HTTPS"
-
-    # RADIUS — apenas do MikroTik
-    ufw allow from "${MIKROTIK_IP}" to any port 1812 proto udp \
-        comment "RADIUS Auth — MikroTik"
-    ufw allow from "${MIKROTIK_IP}" to any port 1813 proto udp \
-        comment "RADIUS Acct — MikroTik"
-
-    # RADIUS localhost (radtest)
-    ufw allow from 127.0.0.1 to any port 1812 proto udp comment "RADIUS local auth"
-    ufw allow from 127.0.0.1 to any port 1813 proto udp comment "RADIUS local acct"
-
+    ufw allow 443/tcp          comment "HTTPS"
+    ufw allow from "${MIKROTIK_IP}" to any port 1812 proto udp comment "RADIUS Auth"
+    ufw allow from "${MIKROTIK_IP}" to any port 1813 proto udp comment "RADIUS Acct"
+    ufw allow from 127.0.0.1   to any port 1812 proto udp comment "RADIUS local"
+    ufw allow from 127.0.0.1   to any port 1813 proto udp comment "RADIUS local"
     ufw --force enable
     success "Firewall ativo."
     ufw status numbered
@@ -718,43 +762,32 @@ configure_firewall() {
 # PASSO 9 — CRON + LOGROTATE
 # ══════════════════════════════════════════════════════════════════════════════
 configure_cron() {
-    step "9/9 — Configurando Cron e Logrotate"
+    step "9/9 — Cron e Logrotate"
 
-    # Crontab do root
+    local CRON_TMP
     CRON_TMP=$(mktemp)
     crontab -l 2>/dev/null > "$CRON_TMP" || true
 
-    # Remove entradas antigas do hotspot-manager
-    grep -v "hotspot-manager\|artisan" "$CRON_TMP" > "${CRON_TMP}.clean" || true
+    # Remove entradas antigas e regrava (idempotente)
+    grep -v "hotspot-manager\|artisan\|radacct" "$CRON_TMP" \
+        > "${CRON_TMP}.clean" || true
     mv "${CRON_TMP}.clean" "$CRON_TMP"
-
-    # Cria .my.cnf para o root — evita expor a senha no crontab e na lista de processos
-    cat > /root/.my.cnf <<MYCNF
-[client]
-user=radius
-password=${DB_PASS}
-host=127.0.0.1
-MYCNF
-    chmod 600 /root/.my.cnf
 
     cat >> "$CRON_TMP" <<EOF
 
-# ── Hotspot Manager ────────────────────────────────────
-# Laravel Scheduler (a cada minuto)
+# ── Hotspot Manager ────────────────────────────────────────────
+# Laravel Scheduler
 * * * * * cd ${INSTALL_DIR} && php artisan schedule:run >> /dev/null 2>&1
-
-# Expira usuários vencidos (01:00 diariamente)
+# Expira usuários vencidos (01:00)
 0 1 * * * cd ${INSTALL_DIR} && php artisan hotspot:expire-users >> /dev/null 2>&1
-
-# Limpa sessões RADIUS antigas (> 90 dias) — domingo 03:00
+# Purga sessões RADIUS > 90 dias (domingo 03:00)
 0 3 * * 0 mariadb radius -e "DELETE FROM radacct WHERE acctstoptime < DATE_SUB(NOW(), INTERVAL 90 DAY);" >> /dev/null 2>&1
 EOF
 
     crontab "$CRON_TMP"
     rm -f "$CRON_TMP"
-    success "Cron configurado no crontab de root."
+    success "Cron configurado."
 
-    # Logrotate
     cat > /etc/logrotate.d/hotspot-manager <<EOF
 ${INSTALL_DIR}/storage/logs/*.log {
     daily
@@ -766,8 +799,7 @@ ${INSTALL_DIR}/storage/logs/*.log {
     create 0640 www-data www-data
     sharedscripts
     postrotate
-        /usr/bin/find ${INSTALL_DIR}/storage/logs -name "*.log" \
-            -mtime +30 -delete 2>/dev/null || true
+        find ${INSTALL_DIR}/storage/logs -name "*.log" -mtime +30 -delete 2>/dev/null || true
     endscript
 }
 EOF
@@ -780,138 +812,124 @@ EOF
 print_summary() {
     local SERVER_IP
     SERVER_IP=$(hostname -I | awk '{print $1}')
+    local NOW
+    NOW=$(date "+%d/%m/%Y %H:%M:%S")
 
-    local CRED_FILE="/root/hotspot-manager-credentials.txt"
-    local INSTALL_DATE
-    INSTALL_DATE=$(date "+%d/%m/%Y %H:%M:%S")
-
-    # ── Grava arquivo de credenciais ─────────────────────────────────────────
     cat > "$CRED_FILE" <<EOF
 ================================================================================
-  HOTSPOT MANAGER — CREDENCIAIS DE INSTALAÇÃO
-  Gerado em: ${INSTALL_DATE}
+  HOTSPOT MANAGER — CREDENCIAIS
+  Modo    : ${MODE^^}
+  Gerado  : ${NOW}
 ================================================================================
 
 ACESSO AO PAINEL
-  Painel Admin  : http://${APP_HOST}:${APP_PORT}/admin
-  Captive Portal: http://${APP_HOST}:${APP_PORT}/portal
+  URL Admin     : http://${APP_HOST}:${APP_PORT}/admin
+  URL Portal    : http://${APP_HOST}:${APP_PORT}/portal
   Login         : admin@hotspot.local
   Senha         : ${ADMIN_PASS}
 
 BANCO DE DADOS (MariaDB)
-  Host    : 127.0.0.1
-  Porta   : 3306
+  Host    : 127.0.0.1:3306
   Banco   : radius
   Usuário : radius
   Senha   : ${DB_PASS}
-  Acesso  : mariadb -u radius -p'${DB_PASS}' radius
+  Acesso  : mariadb -u radius -p'${DB_PASS}' -h 127.0.0.1 radius
 
 FREERADIUS
   RADIUS Secret : ${RADIUS_SECRET}
-  Porta Auth    : 1812/udp
-  Porta Acct    : 1813/udp
+  Auth          : 1812/udp
+  Acct          : 1813/udp
   MikroTik IP   : ${MIKROTIK_IP}
 
 SERVIDOR
-  IP do servidor: ${SERVER_IP}
-  Diretório app : ${INSTALL_DIR}
+  IP            : ${SERVER_IP}
+  Diretório     : ${INSTALL_DIR}
   Web server    : ${WEB_SERVER}
-  Timezone      : ${APP_TZ}
 
-CONFIGURAR MIKROTIK (Terminal / Winbox)
+MIKROTIK — cole no terminal do RouterOS:
   /radius add \\
       service=hotspot \\
       address=${SERVER_IP} \\
       secret=${RADIUS_SECRET} \\
       authentication-port=1812 \\
       accounting-port=1813
+  /ip hotspot profile set [find] use-radius=yes radius-accounting=yes
 
-  /ip hotspot profile set [find] \\
-      use-radius=yes radius-accounting=yes
-
-TESTAR RADIUS (no servidor)
+TESTE RADIUS:
   radtest usuario senha 127.0.0.1 0 ${RADIUS_SECRET}
 
-DIAGNÓSTICO
+DIAGNÓSTICO:
   journalctl -u freeradius -f
   journalctl -u ${WEB_SERVER} -f
   tail -f ${INSTALL_DIR}/storage/logs/laravel.log
   freeradius -X
 
-LOG DE INSTALAÇÃO
+LOG DE INSTALAÇÃO:
   /var/log/hotspot-manager-install.log
 
 ================================================================================
-  ATENÇÃO: Guarde este arquivo em local seguro e remova-o após salvar as senhas!
-  Para remover: rm -f ${CRED_FILE}
+  REMOVA ESTE ARQUIVO APÓS GUARDAR AS SENHAS: rm -f ${CRED_FILE}
 ================================================================================
 EOF
     chmod 600 "$CRED_FILE"
-    success "Credenciais salvas em: ${CRED_FILE}"
 
-    # ── Exibe resumo no terminal ──────────────────────────────────────────────
     echo ""
     echo -e "${GREEN}${BOLD}"
-    echo "╔══════════════════════════════════════════════════════════════════╗"
-    echo "║           INSTALAÇÃO CONCLUÍDA COM SUCESSO!                      ║"
-    echo "╠══════════════════════════════════════════════════════════════════╣"
+    echo "╔════════════════════════════════════════════════════════════════════╗"
+    printf "║  %-66s  ║\n" "$([ "$MODE" == "update" ] && echo "ATUALIZAÇÃO CONCLUÍDA!" || echo "INSTALAÇÃO CONCLUÍDA!")"
+    echo "╠════════════════════════════════════════════════════════════════════╣"
     echo -e "║${NC}"
-    echo -e "${GREEN}${BOLD}║${NC}  Painel Admin  :  ${BOLD}http://${APP_HOST}:${APP_PORT}/admin${NC}"
-    echo -e "${GREEN}${BOLD}║${NC}  Captive Portal:  ${BOLD}http://${APP_HOST}:${APP_PORT}/portal${NC}"
+    echo -e "${GREEN}${BOLD}║${NC}  Admin  :  ${BOLD}http://${APP_HOST}:${APP_PORT}/admin${NC}"
+    echo -e "${GREEN}${BOLD}║${NC}  Portal :  ${BOLD}http://${APP_HOST}:${APP_PORT}/portal${NC}"
     echo -e "${GREEN}${BOLD}║${NC}"
-    echo -e "${GREEN}${BOLD}║${NC}  Login admin   :  ${BOLD}admin@hotspot.local${NC}"
-    echo -e "${GREEN}${BOLD}║${NC}  Senha admin   :  ${BOLD}${ADMIN_PASS}${NC}"
+    echo -e "${GREEN}${BOLD}║${NC}  Login  :  ${BOLD}admin@hotspot.local${NC}"
+    echo -e "${GREEN}${BOLD}║${NC}  Senha  :  ${BOLD}${ADMIN_PASS}${NC}"
     echo -e "${GREEN}${BOLD}║${NC}"
-    echo -e "${GREEN}${BOLD}║${NC}  MariaDB senha :  ${BOLD}${DB_PASS}${NC}"
-    echo -e "${GREEN}${BOLD}║${NC}  RADIUS secret :  ${BOLD}${RADIUS_SECRET}${NC}"
-    echo -e "${GREEN}${BOLD}║${NC}  MikroTik IP   :  ${BOLD}${MIKROTIK_IP}${NC}"
+    echo -e "${GREEN}${BOLD}║${NC}  DB     :  ${BOLD}${DB_PASS}${NC}"
+    echo -e "${GREEN}${BOLD}║${NC}  RADIUS :  ${BOLD}${RADIUS_SECRET}${NC}"
     echo -e "${GREEN}${BOLD}║${NC}"
-    echo -e "${GREEN}${BOLD}╠══════════════════════════════════════════════════════════════════╣"
-    echo -e "║${NC}  Cole no MikroTik (Terminal / Winbox):${GREEN}${BOLD}"
-    echo -e "╠══════════════════════════════════════════════════════════════════╣${NC}"
-    echo ""
+    echo -e "${GREEN}${BOLD}╠════════════════════════════════════════════════════════════════════╣"
+    echo -e "║${NC}  MikroTik (cole no RouterOS):${GREEN}${BOLD}"
+    echo -e "╠════════════════════════════════════════════════════════════════════╣${NC}"
     printf "  /radius add \\\\\n"
     printf "      service=hotspot \\\\\n"
     printf "      address=%s \\\\\n" "$SERVER_IP"
     printf "      secret=%s \\\\\n" "$RADIUS_SECRET"
     printf "      authentication-port=1812 \\\\\n"
-    printf "      accounting-port=1813\n"
+    printf "      accounting-port=1813\n\n"
+    printf "  /ip hotspot profile set [find] use-radius=yes radius-accounting=yes\n\n"
+    echo -e "${GREEN}${BOLD}╠════════════════════════════════════════════════════════════════════╣${NC}"
+    echo "  Credenciais completas: ${CRED_FILE}"
+    echo "  Log de instalação   : /var/log/hotspot-manager-install.log"
+    echo -e "${YELLOW}${BOLD}  Guarde as credenciais acima antes de fechar o terminal!${NC}"
+    echo -e "${GREEN}${BOLD}╚════════════════════════════════════════════════════════════════════╝${NC}"
     echo ""
-    printf "  /ip hotspot profile set [find] \\\\\n"
-    printf "      use-radius=yes radius-accounting=yes\n"
-    echo ""
-    echo -e "${GREEN}${BOLD}╠══════════════════════════════════════════════════════════════════╣"
-    echo -e "║  Testar RADIUS:                                                  ║"
-    echo -e "╠══════════════════════════════════════════════════════════════════╣${NC}"
-    echo "  radtest usuario senha 127.0.0.1 0 ${RADIUS_SECRET}"
-    echo ""
-    echo -e "${GREEN}${BOLD}╠══════════════════════════════════════════════════════════════════╣"
-    echo -e "║  Diagnóstico:                                                    ║"
-    echo -e "╠══════════════════════════════════════════════════════════════════╣${NC}"
-    echo "  journalctl -u freeradius -f"
-    echo "  journalctl -u ${WEB_SERVER} -f"
-    echo "  tail -f ${INSTALL_DIR}/storage/logs/laravel.log"
-    echo "  freeradius -X                  # debug interativo"
-    echo ""
-    echo -e "${GREEN}${BOLD}╠══════════════════════════════════════════════════════════════════╣"
-    echo -e "║  Arquivos de referência:                                         ║"
-    echo -e "╠══════════════════════════════════════════════════════════════════╣${NC}"
-    echo "  ${CRED_FILE}   (CREDENCIAIS — chmod 600)"
-    echo "  /var/log/hotspot-manager-install.log        (log completo)"
-    echo ""
-    echo -e "${YELLOW}${BOLD}  ATENÇÃO: Guarde as credenciais acima antes de fechar este terminal!${NC}"
-    echo -e "${YELLOW}${BOLD}  Arquivo salvo em: ${CRED_FILE}${NC}"
-    echo -e "${GREEN}${BOLD}╚══════════════════════════════════════════════════════════════════╝${NC}"
-    echo ""
+}
+
+# ══════════════════════════════════════════════════════════════════════════════
+# HELPER — restart seguro (funciona para serviço parado ou rodando)
+# ══════════════════════════════════════════════════════════════════════════════
+_service_restart() {
+    local SVC="$1"
+    if systemctl is-active --quiet "$SVC"; then
+        systemctl restart "$SVC" \
+            || { journalctl -u "$SVC" -n 20 --no-pager || true
+                 error "${SVC} falhou ao reiniciar."; }
+    else
+        if ! systemctl start "$SVC"; then
+            journalctl -u "$SVC" -n 20 --no-pager || true
+            error "${SVC} falhou ao iniciar."
+        fi
+    fi
+    success "${SVC} rodando."
 }
 
 # ══════════════════════════════════════════════════════════════════════════════
 # TRAP DE ERROS
 # ══════════════════════════════════════════════════════════════════════════════
 on_error() {
-    local line=$1
-    echo -e "\n${RED}${BOLD}[ERRO FATAL]${NC} Falha na linha ${line}."
-    echo "Verifique o log completo em: /var/log/hotspot-manager-install.log"
+    echo -e "\n${RED}${BOLD}[ERRO FATAL]${NC} Falha na linha $1."
+    echo "Log completo: /var/log/hotspot-manager-install.log"
 }
 trap 'on_error $LINENO' ERR
 
@@ -925,22 +943,21 @@ main() {
     check_internet
     collect_config
 
-    LOG_FILE="/var/log/hotspot-manager-install.log"
+    local LOG_FILE="/var/log/hotspot-manager-install.log"
     exec > >(tee -a "$LOG_FILE") 2>&1
-    info "Log sendo gravado em: ${LOG_FILE}"
-    echo "Início: $(date -Iseconds)"
+    echo "════ Início: $(date -Iseconds) — modo: ${MODE} ════"
 
     update_system
     install_php
     install_composer
     install_mariadb
-    install_app          # ← deve vir antes do FreeRADIUS (copia configs)
+    install_app
     install_freeradius
     install_webserver
     configure_firewall
     configure_cron
 
-    echo "Fim: $(date -Iseconds)"
+    echo "════ Fim: $(date -Iseconds) ════"
     print_summary
 }
 
