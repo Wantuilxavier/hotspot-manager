@@ -192,7 +192,25 @@ install_php() {
     sed -i 's/^listen\.owner.*/listen.owner = root/'  "$PHP_POOL" 2>/dev/null || true
     sed -i 's/^listen\.group.*/listen.group = root/'  "$PHP_POOL" 2>/dev/null || true
 
-    systemctl enable --now php8.2-fpm
+    # Garante que o diretório do socket existe antes de iniciar o FPM.
+    # No Debian 13 (Trixie), o systemd-tmpfiles pode não ter criado /run/php
+    # ainda durante a primeira instalação, causando falha no startup do FPM.
+    mkdir -p /run/php
+    # Processa as entradas tmpfiles do PHP-FPM (recria o diretório com as permissões corretas)
+    for tmpfile in /usr/lib/tmpfiles.d/php8.2-fpm.conf /etc/tmpfiles.d/php8.2-fpm.conf; do
+        [[ -f "$tmpfile" ]] && systemd-tmpfiles --create "$tmpfile" 2>/dev/null || true
+    done
+
+    systemctl enable php8.2-fpm
+    if ! systemctl start php8.2-fpm; then
+        warn "Primeira tentativa de start do PHP-FPM falhou. Diagnóstico:"
+        journalctl -u php8.2-fpm -n 20 --no-pager || true
+        php-fpm8.2 --test 2>&1 || true
+        # Tenta novamente após pausa (race condition no socket tmpfile)
+        sleep 2
+        systemctl start php8.2-fpm \
+            || error "PHP-FPM não iniciou. Verifique: journalctl -xeu php8.2-fpm"
+    fi
     success "PHP $(php -r 'echo PHP_VERSION;') instalado e configurado."
 }
 
