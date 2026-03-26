@@ -54,14 +54,15 @@ sql {
     # ─── Tabelas ───────────────────────────────────────────────────────────
     # Estas devem coincidir com as migrations do Hotspot Manager
 
-    # Tabela de autenticação (radcheck)
+    # Tabela de atributos de check do usuário (radcheck)
     authcheck_table = "radcheck"
 
-    # Tabela de grupos de autenticação (radgroupcheck)
+    # Tabela de atributos de reply do usuário (radreply)
     authreply_table = "radreply"
 
-    # Tabela de reply de grupo (radgroupreply)
+    # Tabela de atributos de check do grupo (radgroupcheck)
     groupcheck_table = "radgroupcheck"
+    # Tabela de atributos de reply do grupo — ex: Mikrotik-Rate-Limit (radgroupreply)
     groupreply_table = "radgroupreply"
 
     # Tabela de membros de grupo (radusergroup)

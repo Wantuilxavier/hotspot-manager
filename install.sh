@@ -193,7 +193,26 @@ install_php() {
 
     # Pool FPM — PHP proíbe workers como root (proteção hard-coded)
     local PHP_POOL="/etc/php/8.2/fpm/pool.d/www.conf"
-    [[ -f "$PHP_POOL" ]] || error "Pool config não encontrado: ${PHP_POOL}"
+
+    if [[ ! -f "$PHP_POOL" ]]; then
+        # "Not replacing deleted config file" — dpkg marcou os conffiles como
+        # apagados pelo usuário; --reinstall respeita isso e não recria.
+        # Solução: purgar TODOS os pacotes php8.2* (limpa estado dpkg de todos)
+        # e reinstalar o conjunto completo — evita que php8.2-common (phar, etc.)
+        # fique como órfão após purgar apenas php8.2-fpm.
+        warn "Config PHP-FPM ausente (dpkg conffile state) — purgando php8.2* para reinstalação limpa..."
+        apt-get purge -y -qq "php8.2*" 2>/dev/null || true
+        apt-get autoremove -y -qq 2>/dev/null || true
+        apt-get install -y -qq \
+            php8.2 php8.2-fpm php8.2-cli php8.2-common \
+            php8.2-mysql php8.2-mbstring php8.2-xml php8.2-curl \
+            php8.2-zip php8.2-bcmath php8.2-intl php8.2-gd \
+            php8.2-tokenizer php8.2-pdo php8.2-readline
+    fi
+
+    [[ -f "$PHP_POOL" ]] \
+        || error "Pool config não encontrado: ${PHP_POOL}. Verifique: dpkg -l php8.2-fpm"
+
     sed -i 's/^user = .*/user = www-data/'               "$PHP_POOL"
     sed -i 's/^group = .*/group = www-data/'             "$PHP_POOL"
     sed -i 's/^listen\.owner.*/listen.owner = www-data/' "$PHP_POOL" 2>/dev/null || true
@@ -269,18 +288,24 @@ install_mariadb() {
     info "Socket: ${SOCKET}"
 
     # Cria banco + usuário (CREATE OR REPLACE — sempre sincroniza a senha)
+    # Dois grants: @'localhost' (socket) e @'127.0.0.1' (TCP).
+    # FreeRADIUS conecta via TCP (server = "127.0.0.1") — precisa do grant TCP.
     runuser -u mysql -- mariadb --socket="${SOCKET}" <<SQL
 CREATE DATABASE IF NOT EXISTS radius
     CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
-CREATE OR REPLACE USER 'radius'@'localhost' IDENTIFIED BY '${DB_PASS}';
+CREATE OR REPLACE USER 'radius'@'localhost'  IDENTIFIED BY '${DB_PASS}';
+CREATE OR REPLACE USER 'radius'@'127.0.0.1' IDENTIFIED BY '${DB_PASS}';
 GRANT ALL PRIVILEGES ON radius.* TO 'radius'@'localhost';
+GRANT ALL PRIVILEGES ON radius.* TO 'radius'@'127.0.0.1';
 FLUSH PRIVILEGES;
 SQL
 
-    # Confirma autenticação
-    mariadb -u radius -p"${DB_PASS}" -h 127.0.0.1 radius -e "SELECT 1;" &>/dev/null \
-        || error "Autenticação falhou após CREATE OR REPLACE USER. Senha: ${DB_PASS}"
-    success "Usuário 'radius' autenticado com sucesso."
+    # Confirma autenticação via TCP (--protocol=tcp força TCP mesmo em localhost)
+    # Este é o mesmo caminho que FreeRADIUS usa: server = "127.0.0.1"
+    mariadb -u radius -p"${DB_PASS}" -h 127.0.0.1 --protocol=tcp radius \
+        -e "SELECT 1;" &>/dev/null \
+        || error "Autenticação TCP falhou para 'radius'@'127.0.0.1'. Senha: ${DB_PASS}"
+    success "Usuário 'radius' autenticado via TCP com sucesso."
 
     # Persiste credenciais
     printf '# Hotspot Manager — MariaDB\nDB_USER=radius\nDB_NAME=radius\nDB_PASS=%s\n' \
@@ -536,13 +561,44 @@ _env_set() {
 install_freeradius() {
     step "6/9 — FreeRADIUS 3"
 
+    # Bloqueia start automático durante apt-get install.
+    # O FreeRADIUS roda ExecStartPre=-Cx (config check) antes de iniciar;
+    # como ainda não configuramos nada, esse check falha e o pacote fica
+    # em estado parcial com a estrutura de /etc/freeradius/3.0 incompleta.
+    echo '#!/bin/sh
+exit 101' > /usr/sbin/policy-rc.d
+    chmod +x /usr/sbin/policy-rc.d
+
     apt-get install -y -qq \
         freeradius freeradius-mysql freeradius-utils freeradius-common
+
+    rm -f /usr/sbin/policy-rc.d
 
     local FR_DIR="/etc/freeradius/3.0"
     local FR_VERSION
     FR_VERSION=$(freeradius -v 2>&1 | grep -oP '[\d]+\.[\d]+\.[\d]+' | head -1 || echo "3.x")
     success "FreeRADIUS ${FR_VERSION}."
+
+    # Garante que a estrutura de configuração foi criada pelo pacote.
+    # radiusd.conf  → pacote freeradius
+    # mods-available/ → pacote freeradius-config
+    # Se qualquer um estiver ausente: dpkg marcou conffiles como "user-deleted"
+    # (causado por rm -rf /etc/freeradius sem purge prévio).
+    # Solução: purgar freeradius* inteiro (limpa estado dpkg de todos) e reinstalar.
+    if [[ ! -d "${FR_DIR}/mods-available" ]] || [[ ! -f "${FR_DIR}/radiusd.conf" ]]; then
+        warn "Estrutura FreeRADIUS incompleta (dpkg conffile state) — purgando para reinstalação limpa..."
+        echo '#!/bin/sh
+exit 101' > /usr/sbin/policy-rc.d
+        chmod +x /usr/sbin/policy-rc.d
+        apt-get purge -y -qq "freeradius*" 2>/dev/null || true
+        apt-get autoremove -y -qq 2>/dev/null || true
+        apt-get install -y -qq \
+            freeradius freeradius-mysql freeradius-utils freeradius-common
+        rm -f /usr/sbin/policy-rc.d
+        [[ -d "${FR_DIR}/mods-available" ]] && [[ -f "${FR_DIR}/radiusd.conf" ]] \
+            || error "Falha ao restaurar estrutura FreeRADIUS. \
+Verifique: dpkg -l freeradius freeradius-config"
+    fi
 
     # ── Dicionário MikroTik ────────────────────────────────────────────────
     [[ -f "${INSTALL_DIR}/freeradius/dictionary.mikrotik" ]] \
@@ -585,7 +641,34 @@ install_freeradius() {
            "${FR_DIR}/sites-enabled/hotspot" 2>/dev/null || true
     success "Virtual server 'hotspot' ativado."
 
-    # ── clients.conf — adiciona se ainda não existir ───────────────────────
+    # Desabilita o site 'default' do pacote — ele também declara listen { port = 0 }
+    # para auth (1812) e acct (1813). Com 'hotspot' fazendo o mesmo, o segundo bind
+    # falha com "Address already in use". O 'hotspot' é o único server necessário.
+    rm -f "${FR_DIR}/sites-enabled/default" 2>/dev/null || true
+    info "Site 'default' desabilitado (evita conflito de porta com 'hotspot')."
+
+    # ── clients.conf ──────────────────────────────────────────────────────
+    # Remove o bloco localhost_radtest se foi adicionado por versões anteriores
+    # do instalador — causava "Failed to add duplicate client localhost" porque
+    # o FreeRADIUS já tem um "client localhost" padrão para 127.0.0.1.
+    if grep -q "client localhost_radtest" "${FR_DIR}/clients.conf"; then
+        # Remove o bloco completo (da linha "client localhost_radtest" até "}")
+        sed -i '/^client localhost_radtest/,/^}/d' "${FR_DIR}/clients.conf"
+        info "Bloco localhost_radtest duplicado removido do clients.conf."
+    fi
+
+    # O FreeRADIUS já inclui um "client localhost" padrão para 127.0.0.1.
+    # NÃO adicionamos outro cliente com o mesmo IP — causaria erro fatal:
+    # "Failed to add duplicate client localhost".
+    # Atualizamos o secret dos clientes padrão e adicionamos apenas o MikroTik.
+
+    # Atualiza secrets dos clientes padrão (localhost e localhost_ipv6)
+    sed -i "/^client localhost[^_]/,/^}/ s|secret\s*=.*|secret    = ${RADIUS_SECRET}|" \
+        "${FR_DIR}/clients.conf" 2>/dev/null || true
+    sed -i "/^client localhost_ipv6/,/^}/ s|secret\s*=.*|secret    = ${RADIUS_SECRET}|" \
+        "${FR_DIR}/clients.conf" 2>/dev/null || true
+
+    # Adiciona cliente MikroTik se ainda não existir; sincroniza secret se existir
     if ! grep -q "client mikrotik_hotspot" "${FR_DIR}/clients.conf"; then
         cat >> "${FR_DIR}/clients.conf" <<EOF
 
@@ -597,39 +680,73 @@ client mikrotik_hotspot {
     nastype   = other
     require_message_authenticator = no
 }
-client localhost_radtest {
-    ipaddr    = 127.0.0.1
-    secret    = ${RADIUS_SECRET}
-    shortname = localhost
-}
 EOF
         success "MikroTik (${MIKROTIK_IP}) adicionado ao clients.conf."
     else
-        # Em update, sincroniza o secret (pode ter mudado)
-        # Substitui o bloco client mikrotik_hotspot existente
         sed -i "/client mikrotik_hotspot/,/^}/ s|secret\s*=.*|secret    = ${RADIUS_SECRET}|" \
             "${FR_DIR}/clients.conf" 2>/dev/null || true
-        sed -i "/client localhost_radtest/,/^}/ s|secret\s*=.*|secret    = ${RADIUS_SECRET}|" \
-            "${FR_DIR}/clients.conf" 2>/dev/null || true
-        info "clients.conf: secret sincronizado."
+        info "clients.conf: secret MikroTik sincronizado."
     fi
 
     # ── Permissões ─────────────────────────────────────────────────────────
     chown -R freerad:freerad "${FR_DIR}"
 
-    # ── Valida e reinicia ──────────────────────────────────────────────────
-    local FR_CHECK
-    FR_CHECK=$(freeradius -XC 2>&1) || true
+    # ── Valida configuração ────────────────────────────────────────────────
+    # Usa código de saída, não grep — palavras como "send_error" dariam falso positivo
+    local FR_CHECK FR_OK=0
+    FR_CHECK=$(freeradius -XC 2>&1) || FR_OK=$?
 
-    if echo "$FR_CHECK" | grep -qi "error"; then
-        warn "FreeRADIUS reportou erros:"
-        echo "$FR_CHECK" | grep -i "error" | head -10
+    if [[ $FR_OK -ne 0 ]]; then
+        warn "FreeRADIUS: configuração inválida (código ${FR_OK}):"
+        echo "$FR_CHECK" | tail -20
         warn "Corrija e rode: systemctl restart freeradius"
-    else
-        systemctl enable freeradius
-        _service_restart freeradius
-        success "FreeRADIUS iniciado."
+        return 0   # não aborta — admin pode corrigir manualmente
     fi
+
+    # ── Verifica conectividade MariaDB antes de iniciar ───────────────────
+    # freeradius -XC não testa a conexão real — o daemon falha ao iniciar o pool.
+    # Confirma aqui com os mesmos parâmetros do módulo SQL (TCP 127.0.0.1:3306).
+    info "Verificando acesso MariaDB para FreeRADIUS (TCP 127.0.0.1:3306)..."
+    mariadb -u radius -p"${DB_PASS}" -h 127.0.0.1 --protocol=tcp radius \
+        -e "SELECT 1 FROM information_schema.tables \
+            WHERE table_schema='radius' AND table_name='radcheck' LIMIT 1;" \
+        &>/dev/null \
+        || error "FreeRADIUS não consegue conectar ao MariaDB via TCP. \
+Verifique: GRANT para 'radius'@'127.0.0.1' e se tabela radcheck existe."
+    success "MariaDB acessível via TCP — FreeRADIUS pode conectar."
+
+    # ── Override do ExecStartPre defeituoso ────────────────────────────────
+    # No Debian 13, freeradius.service tem:
+    #   ExecStartPre=/usr/sbin/freeradius $FREERADIUS_OPTIONS -Cx -lstdout
+    # O flag -Cx retorna exit code 1 mesmo quando a configuração está correta,
+    # impedindo o ExecStart de rodar. Nossa validação com -XC acima já garante
+    # que a config é válida — o ExecStartPre é redundante e defeituoso aqui.
+    mkdir -p /etc/systemd/system/freeradius.service.d/
+    cat > /etc/systemd/system/freeradius.service.d/override.conf << 'OVERRIDE'
+[Service]
+ExecStartPre=
+OVERRIDE
+    systemctl daemon-reload
+    info "Override ExecStartPre aplicado (freeradius.service.d/override.conf)."
+
+    # ── Limpa estado antes de iniciar ─────────────────────────────────────
+    # Processos freeradius de sessões anteriores (loop de restart) podem estar
+    # segurando as portas 1812/1813 UDP, impedindo o novo start.
+    systemctl stop freeradius 2>/dev/null || true
+    pkill -x freeradius      2>/dev/null || true
+    sleep 1
+    # Confirma que as portas estão livres
+    if ss -ulnp 2>/dev/null | grep -qE ':1812|:1813'; then
+        warn "Porta RADIUS ainda em uso após stop. Forçando kill..."
+        pkill -9 -x freeradius 2>/dev/null || true
+        sleep 2
+    fi
+    # Reseta estado de falha do systemd (evita que o restart counter bloqueie o start)
+    systemctl reset-failed freeradius 2>/dev/null || true
+
+    systemctl enable freeradius
+    _service_restart freeradius
+    success "FreeRADIUS iniciado."
 
     # Persiste secret
     printf '# Hotspot Manager — RADIUS\nRADIUS_SECRET=%s\nMIKROTIK_IP=%s\n' \
@@ -742,18 +859,19 @@ EOF
 configure_firewall() {
     step "8/9 — Firewall (UFW)"
 
-    ufw --force reset
+    # Não faz reset das regras — preserva configurações existentes (ex: SSH já liberado)
+    ufw --force enable
     ufw default deny incoming
     ufw default allow outgoing
-    ufw allow 22/tcp           comment "SSH"
-    [[ "$APP_PORT" != "80" ]] && ufw allow 80/tcp comment "HTTP"
-    ufw allow "${APP_PORT}/tcp" comment "Hotspot Manager"
-    ufw allow 443/tcp          comment "HTTPS"
-    ufw allow from "${MIKROTIK_IP}" to any port 1812 proto udp comment "RADIUS Auth"
-    ufw allow from "${MIKROTIK_IP}" to any port 1813 proto udp comment "RADIUS Acct"
-    ufw allow from 127.0.0.1   to any port 1812 proto udp comment "RADIUS local"
-    ufw allow from 127.0.0.1   to any port 1813 proto udp comment "RADIUS local"
-    ufw --force enable
+    # SSH — garante que não bloqueie o acesso remoto
+    ufw allow 22/tcp           comment "SSH" 2>/dev/null || true
+    [[ "$APP_PORT" != "80" ]] && { ufw allow 80/tcp comment "HTTP" 2>/dev/null || true; }
+    ufw allow "${APP_PORT}/tcp" comment "Hotspot Manager" 2>/dev/null || true
+    ufw allow 443/tcp          comment "HTTPS" 2>/dev/null || true
+    ufw allow from "${MIKROTIK_IP}" to any port 1812 proto udp comment "RADIUS Auth" 2>/dev/null || true
+    ufw allow from "${MIKROTIK_IP}" to any port 1813 proto udp comment "RADIUS Acct" 2>/dev/null || true
+    ufw allow from 127.0.0.1   to any port 1812 proto udp comment "RADIUS local" 2>/dev/null || true
+    ufw allow from 127.0.0.1   to any port 1813 proto udp comment "RADIUS local" 2>/dev/null || true
     success "Firewall ativo."
     ufw status numbered
 }
@@ -930,6 +1048,8 @@ _service_restart() {
 on_error() {
     echo -e "\n${RED}${BOLD}[ERRO FATAL]${NC} Falha na linha $1."
     echo "Log completo: /var/log/hotspot-manager-install.log"
+    # Remove policy-rc.d caso o erro tenha ocorrido durante apt-get install
+    rm -f /usr/sbin/policy-rc.d 2>/dev/null || true
 }
 trap 'on_error $LINENO' ERR
 

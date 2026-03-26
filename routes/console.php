@@ -8,5 +8,5 @@ Artisan::command('inspire', function () {
     $this->comment(Inspiring::quote());
 })->purpose('Display an inspiring quote');
 
-// Agenda: expira usuários com validade vencida (rodado pelo cron diariamente)
-// Schedule::command('hotspot:expire-users')->daily();
+// Expira usuários com validade vencida — roda diariamente à 01:00
+Schedule::command('hotspot:expire-users')->dailyAt('01:00');

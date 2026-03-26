@@ -10,7 +10,7 @@ class SelfRegisterRequest extends FormRequest
 
     public function rules(): array
     {
-        $phoneRequired = config('app.portal_require_phone', false) ? 'required' : 'nullable';
+        $phoneRequired = config('portal.require_phone', false) ? 'required' : 'nullable';
 
         return [
             'username'    => ['required', 'string', 'min:3', 'max:64', 'unique:hotspot_users,username', 'regex:/^[a-zA-Z0-9._@-]+$/'],

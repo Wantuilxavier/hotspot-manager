@@ -97,12 +97,9 @@ class UserController extends Controller
             $this->radiusService->changePassword($user->username, $data['password']);
         }
 
-        $user->update(array_filter([
-            'full_name' => $data['full_name'] ?? null,
-            'email'     => $data['email']     ?? null,
-            'phone'     => $data['phone']     ?? null,
-            'document'  => $data['document']  ?? null,
-            'notes'     => $data['notes']     ?? null,
+        // Usa safe()->only() para incluir campos com valor null (limpa campos removidos)
+        $user->update($request->safe()->only([
+            'full_name', 'email', 'phone', 'document', 'notes',
         ]));
 
         return redirect()

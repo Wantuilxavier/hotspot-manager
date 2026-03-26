@@ -32,11 +32,6 @@ class Plan extends Model
 
     // ---- Accessors ------------------------------------------------------
 
-    public function getRateLimitAttribute(): string
-    {
-        return "{$this->upload_rate}/{$this->download_rate}";
-    }
-
     public function getPriceFormattedAttribute(): string
     {
         return 'R$ ' . number_format($this->price, 2, ',', '.');

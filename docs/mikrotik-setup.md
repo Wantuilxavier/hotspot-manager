@@ -84,36 +84,25 @@ Para isso, o Queue Type deve estar configurado:
 /radius incoming print
 ```
 
-## 6. Configurar o Captive Portal personalizado
+## 6. Configurar o Captive Portal externo (Hotspot Manager)
+
+O Hotspot Manager funciona como portal captivo externo. O MikroTik redireciona
+usuários não autenticados para o servidor Laravel, que exibe o formulário de
+auto-cadastro e devolve as credenciais.
 
 ```routeros
-# Baixa os arquivos do portal para o flash
-/tool fetch url="http://192.168.1.100/portal-files.zip" \
-    dst-path=flash/hotspot/
-
-# Extrai (necessita RouterOS 7+)
-# Ou copie via FTP/SCP para /flash/hotspot/
-
-# O MikroTik redirecionará para o login.html do hotspot.
-# Configure a URL de login personalizada para apontar para o seu servidor:
+# Redireciona usuários não autenticados para o portal externo
+# Substitua 192.168.1.100 pelo IP do servidor Hotspot Manager
 /ip hotspot profile set [find name=radius-profile] \
     login-by=http-pap \
-    html-directory=flash/hotspot
-```
-
-### URL de redirecionamento para o portal externo
-
-Para usar o portal PHP diretamente (sem upload de HTML para o MikroTik):
-
-```routeros
-# No perfil do Hotspot, configure o redirect ao portal externo
-/ip hotspot profile set [find name=radius-profile] \
     http-proxy=192.168.1.100:80
 
-# Alternativa: redirecionar para URL específica
-# O MikroTik passa parâmetros na query string:
+# O MikroTik passa estes parâmetros na query string para o portal:
 # ?mac=XX:XX:XX:XX:XX:XX&ip=192.168.x.x&link-login=...&link-orig=...
+# O portal /portal já os captura e processa automaticamente.
 ```
+
+**URL do portal:** `http://IP_DO_SERVIDOR/portal`
 
 ## 7. Configurar clients.conf do FreeRADIUS
 
