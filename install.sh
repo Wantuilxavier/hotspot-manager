@@ -184,32 +184,33 @@ install_php() {
         sed -i "s|^;date.timezone.*|date.timezone = ${APP_TZ}|"       "$ini_file"
     done
 
-    # Pool FPM rodando como root (já que a app é executada por root)
+    # Corrige o pool www — PHP-FPM não permite workers como root (proteção
+    # hard-coded no código-fonte). Força www-data mesmo que uma execução
+    # anterior do script tenha gravado root no arquivo.
     PHP_POOL="/etc/php/8.2/fpm/pool.d/www.conf"
-    sed -i 's/^user = .*/user = root/'   "$PHP_POOL"
-    sed -i 's/^group = .*/group = root/' "$PHP_POOL"
-    # Também ajusta os sockets de escuta para root
-    sed -i 's/^listen\.owner.*/listen.owner = root/'  "$PHP_POOL" 2>/dev/null || true
-    sed -i 's/^listen\.group.*/listen.group = root/'  "$PHP_POOL" 2>/dev/null || true
+    sed -i 's/^user = .*/user = www-data/'              "$PHP_POOL"
+    sed -i 's/^group = .*/group = www-data/'            "$PHP_POOL"
+    sed -i 's/^listen\.owner.*/listen.owner = www-data/' "$PHP_POOL" 2>/dev/null || true
+    sed -i 's/^listen\.group.*/listen.group = www-data/' "$PHP_POOL" 2>/dev/null || true
 
-    # Garante que o diretório do socket existe antes de iniciar o FPM.
-    # No Debian 13 (Trixie), o systemd-tmpfiles pode não ter criado /run/php
-    # ainda durante a primeira instalação, causando falha no startup do FPM.
+    # Garante que o diretório do socket existe antes do start.
+    # No Debian 13 o systemd-tmpfiles pode não ter criado /run/php ainda.
     mkdir -p /run/php
-    # Processa as entradas tmpfiles do PHP-FPM (recria o diretório com as permissões corretas)
     for tmpfile in /usr/lib/tmpfiles.d/php8.2-fpm.conf /etc/tmpfiles.d/php8.2-fpm.conf; do
         [[ -f "$tmpfile" ]] && systemd-tmpfiles --create "$tmpfile" 2>/dev/null || true
     done
 
+    # Valida a configuração antes de tentar iniciar
+    info "Validando configuração do PHP-FPM..."
+    if ! php-fpm8.2 --test 2>&1; then
+        error "Configuração do PHP-FPM inválida (ver erros acima)."
+    fi
+
     systemctl enable php8.2-fpm
     if ! systemctl start php8.2-fpm; then
-        warn "Primeira tentativa de start do PHP-FPM falhou. Diagnóstico:"
-        journalctl -u php8.2-fpm -n 20 --no-pager || true
-        php-fpm8.2 --test 2>&1 || true
-        # Tenta novamente após pausa (race condition no socket tmpfile)
-        sleep 2
-        systemctl start php8.2-fpm \
-            || error "PHP-FPM não iniciou. Verifique: journalctl -xeu php8.2-fpm"
+        warn "PHP-FPM falhou ao iniciar. Log do serviço:"
+        journalctl -u php8.2-fpm -n 30 --no-pager || true
+        error "PHP-FPM não iniciou. Verifique os erros acima."
     fi
     success "PHP $(php -r 'echo PHP_VERSION;') instalado e configurado."
 }
@@ -254,7 +255,11 @@ install_mariadb() {
 
     apt-get install -y -qq mariadb-server mariadb-client
     systemctl enable mariadb
-    systemctl start mariadb
+    if ! systemctl start mariadb; then
+        warn "MariaDB falhou ao iniciar. Log:"
+        journalctl -u mariadb -n 20 --no-pager || true
+        error "MariaDB não iniciou. Verifique os erros acima."
+    fi
     success "MariaDB instalado."
 
     # Aguarda o socket ficar disponível (até 30s)
@@ -315,6 +320,10 @@ install_app() {
 
     if [[ -d "${INSTALL_DIR}/.git" ]]; then
         info "Repositório já existe em ${INSTALL_DIR}. Atualizando..."
+        # Descarta mudanças locais (ex: install.sh modificado no servidor)
+        # antes de atualizar — o repositório remoto é sempre autoritativo.
+        git -C "$INSTALL_DIR" reset --hard HEAD
+        git -C "$INSTALL_DIR" clean -fd --exclude=".env" 2>/dev/null || true
         git -C "$INSTALL_DIR" pull --ff-only
     else
         info "Clonando repositório via SSH..."
@@ -423,14 +432,20 @@ EOF
     php artisan view:cache
     success "Cache de produção gerado."
 
-    # ── Permissões (root como owner) ────────────────────────────────────────
-    chown -R root:root "$INSTALL_DIR"
-    find "$INSTALL_DIR" -type f -exec chmod 644 {} \;
-    find "$INSTALL_DIR" -type d -exec chmod 755 {} \;
+    # ── Permissões ──────────────────────────────────────────────────────────
+    # O FPM roda como www-data, então storage/ e bootstrap/cache/ precisam
+    # ser graváveis por www-data. O restante permanece de propriedade do root.
+    chown -R root:www-data "$INSTALL_DIR"
+    find "$INSTALL_DIR" -type f -exec chmod 640 {} \;
+    find "$INSTALL_DIR" -type d -exec chmod 750 {} \;
+    # storage/ e bootstrap/cache/ precisam de escrita pelo www-data
+    chown -R www-data:www-data "${INSTALL_DIR}/storage" "${INSTALL_DIR}/bootstrap/cache"
     chmod -R 775 "${INSTALL_DIR}/storage" "${INSTALL_DIR}/bootstrap/cache"
-    # install.sh executável
-    chmod +x "${INSTALL_DIR}/install.sh"
-    success "Permissões configuradas (owner: root)."
+    # public/ precisa ser legível pelo Nginx (www-data)
+    chmod -R 755 "${INSTALL_DIR}/public"
+    # install.sh executável pelo root
+    chmod 700 "${INSTALL_DIR}/install.sh"
+    success "Permissões configuradas (app: root:www-data | storage: www-data)."
 }
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -447,13 +462,18 @@ install_freeradius() {
     success "FreeRADIUS ${FR_VERSION} instalado."
 
     # ── Dicionário MikroTik ────────────────────────────────────────────────
+    [[ -f "${INSTALL_DIR}/freeradius/dictionary.mikrotik" ]] \
+        || error "Arquivo não encontrado: ${INSTALL_DIR}/freeradius/dictionary.mikrotik"
     cp "${INSTALL_DIR}/freeradius/dictionary.mikrotik" /usr/share/freeradius/dictionary.mikrotik
     grep -q "dictionary.mikrotik" /usr/share/freeradius/dictionary \
         || echo '$INCLUDE dictionary.mikrotik' >> /usr/share/freeradius/dictionary
     success "Dicionário MikroTik instalado."
 
     # ── Módulo SQL ─────────────────────────────────────────────────────────
+    [[ -f "${INSTALL_DIR}/freeradius/mods-available/sql" ]] \
+        || error "Arquivo não encontrado: ${INSTALL_DIR}/freeradius/mods-available/sql"
     cp "${INSTALL_DIR}/freeradius/mods-available/sql" "${FR_DIR}/mods-available/sql"
+    # Substitui a senha padrão "secret" pela senha gerada
     sed -i "s|password = \"secret\"|password = \"${DB_PASS}\"|g" \
         "${FR_DIR}/mods-available/sql"
 
@@ -471,6 +491,8 @@ install_freeradius() {
     success "Módulos FreeRADIUS habilitados."
 
     # ── Virtual server hotspot ─────────────────────────────────────────────
+    [[ -f "${INSTALL_DIR}/freeradius/sites-available/hotspot" ]] \
+        || error "Arquivo não encontrado: ${INSTALL_DIR}/freeradius/sites-available/hotspot"
     cp "${INSTALL_DIR}/freeradius/sites-available/hotspot" \
        "${FR_DIR}/sites-available/hotspot"
     ln -sf "${FR_DIR}/sites-available/hotspot" "${FR_DIR}/sites-enabled/hotspot" 2>/dev/null || true
@@ -547,9 +569,6 @@ install_webserver() {
 setup_nginx() {
     apt-get install -y -qq nginx
 
-    # Nginx worker rodando como root
-    sed -i 's/^user .*/user root;/' /etc/nginx/nginx.conf
-
     cat > /etc/nginx/sites-available/hotspot-manager <<EOF
 # Hotspot Manager — Nginx
 # Gerado em: $(date -Iseconds)
@@ -600,19 +619,22 @@ EOF
            /etc/nginx/sites-enabled/hotspot-manager
     rm -f /etc/nginx/sites-enabled/default
 
-    nginx -t 2>/dev/null \
-        && systemctl enable --now nginx \
-        && systemctl reload nginx
+    if ! nginx -t 2>&1; then
+        error "Configuração do Nginx inválida (ver erros acima)."
+    fi
+    systemctl enable nginx
+    if ! systemctl start nginx; then
+        warn "Nginx falhou ao iniciar. Log:"
+        journalctl -u nginx -n 20 --no-pager || true
+        error "Nginx não iniciou. Verifique os erros acima."
+    fi
+    systemctl reload nginx || true
     success "Nginx configurado na porta ${APP_PORT}."
 }
 
 setup_apache() {
     apt-get install -y -qq apache2 libapache2-mod-php8.2
     a2enmod rewrite php8.2 headers deflate
-
-    # Apache rodando como root
-    sed -i 's/^export APACHE_RUN_USER=.*/export APACHE_RUN_USER=root/'  /etc/apache2/envvars
-    sed -i 's/^export APACHE_RUN_GROUP=.*/export APACHE_RUN_GROUP=root/' /etc/apache2/envvars
 
     cat > /etc/apache2/sites-available/hotspot-manager.conf <<EOF
 # Hotspot Manager — Apache2
@@ -646,9 +668,16 @@ EOF
 
     a2ensite hotspot-manager.conf
     a2dissite 000-default.conf 2>/dev/null || true
-    apache2ctl configtest \
-        && systemctl enable --now apache2 \
-        && systemctl reload apache2
+    if ! apache2ctl configtest 2>&1; then
+        error "Configuração do Apache2 inválida (ver erros acima)."
+    fi
+    systemctl enable apache2
+    if ! systemctl start apache2; then
+        warn "Apache2 falhou ao iniciar. Log:"
+        journalctl -u apache2 -n 20 --no-pager || true
+        error "Apache2 não iniciou. Verifique os erros acima."
+    fi
+    systemctl reload apache2 || true
     success "Apache2 configurado na porta ${APP_PORT}."
 }
 
@@ -699,6 +728,15 @@ configure_cron() {
     grep -v "hotspot-manager\|artisan" "$CRON_TMP" > "${CRON_TMP}.clean" || true
     mv "${CRON_TMP}.clean" "$CRON_TMP"
 
+    # Cria .my.cnf para o root — evita expor a senha no crontab e na lista de processos
+    cat > /root/.my.cnf <<MYCNF
+[client]
+user=radius
+password=${DB_PASS}
+host=127.0.0.1
+MYCNF
+    chmod 600 /root/.my.cnf
+
     cat >> "$CRON_TMP" <<EOF
 
 # ── Hotspot Manager ────────────────────────────────────
@@ -709,8 +747,7 @@ configure_cron() {
 0 1 * * * cd ${INSTALL_DIR} && php artisan hotspot:expire-users >> /dev/null 2>&1
 
 # Limpa sessões RADIUS antigas (> 90 dias) — domingo 03:00
-0 3 * * 0 mariadb -u radius -p'${DB_PASS}' radius -e \
-  "DELETE FROM radacct WHERE acctstoptime < DATE_SUB(NOW(), INTERVAL 90 DAY);" >> /dev/null 2>&1
+0 3 * * 0 mariadb radius -e "DELETE FROM radacct WHERE acctstoptime < DATE_SUB(NOW(), INTERVAL 90 DAY);" >> /dev/null 2>&1
 EOF
 
     crontab "$CRON_TMP"
@@ -726,7 +763,7 @@ ${INSTALL_DIR}/storage/logs/*.log {
     compress
     delaycompress
     notifempty
-    create 0640 root root
+    create 0640 www-data www-data
     sharedscripts
     postrotate
         /usr/bin/find ${INSTALL_DIR}/storage/logs -name "*.log" \
