@@ -64,74 +64,56 @@ check_internet() {
 }
 
 # ══════════════════════════════════════════════════════════════════════════════
-# COLETA DE CONFIGURAÇÕES
+# CONFIGURAÇÃO AUTOMÁTICA
 # ══════════════════════════════════════════════════════════════════════════════
 collect_config() {
-    step "Configuração Interativa"
+    step "Configuração Automática"
 
     # Diretório de instalação
-    ask "Diretório de instalação [/var/www/hotspot-manager]:"
-    read -r INSTALL_DIR
-    INSTALL_DIR="${INSTALL_DIR:-/var/www/hotspot-manager}"
+    INSTALL_DIR="/var/www/hotspot-manager"
 
-    # Domínio / IP
+    # Domínio / IP — detectado automaticamente
     SERVER_IP=$(hostname -I | awk '{print $1}')
-    ask "Domínio ou IP público do servidor [${SERVER_IP}]:"
-    read -r APP_HOST
-    APP_HOST="${APP_HOST:-$SERVER_IP}"
+    APP_HOST="${SERVER_IP}"
 
     # Porta do web server
-    ask "Porta HTTP [80]:"
-    read -r APP_PORT
-    APP_PORT="${APP_PORT:-80}"
+    APP_PORT="80"
 
-    # Banco de dados
-    ask "Senha do usuário 'radius' no MariaDB [gera automático]:"
-    read -rs DB_PASS; echo ""
-    DB_PASS="${DB_PASS:-$(openssl rand -base64 18 | tr -dc 'a-zA-Z0-9' | head -c 22)}"
+    # Banco de dados — senha gerada automaticamente
+    DB_PASS="$(openssl rand -base64 18 | tr -dc 'a-zA-Z0-9' | head -c 22)"
 
-    # RADIUS secret
-    ask "RADIUS Shared Secret [gera automático]:"
-    read -r RADIUS_SECRET
-    RADIUS_SECRET="${RADIUS_SECRET:-$(openssl rand -base64 24 | tr -dc 'a-zA-Z0-9!@#' | head -c 30)}"
+    # RADIUS secret — gerado automaticamente
+    RADIUS_SECRET="$(openssl rand -base64 24 | tr -dc 'a-zA-Z0-9' | head -c 32)"
 
-    # IP do MikroTik
-    ask "IP do roteador MikroTik [192.168.88.1]:"
-    read -r MIKROTIK_IP
-    MIKROTIK_IP="${MIKROTIK_IP:-192.168.88.1}"
+    # IP do MikroTik — padrão (pode ser alterado no .env após a instalação)
+    MIKROTIK_IP="192.168.88.1"
 
     # Web server
-    ask "Web server — (1) Nginx  (2) Apache2  [1]:"
-    read -r WEB_CHOICE
-    [[ "$WEB_CHOICE" == "2" ]] && WEB_SERVER="apache2" || WEB_SERVER="nginx"
+    WEB_SERVER="nginx"
 
-    # Senha admin
-    ask "Senha do administrador do painel [Admin@123]:"
-    read -rs ADMIN_PASS; echo ""
-    ADMIN_PASS="${ADMIN_PASS:-Admin@123}"
+    # Senha admin — gerada automaticamente (mín. 16 chars, maiúsculas + números + especiais)
+    ADMIN_PASS="$(openssl rand -base64 18 | tr -dc 'a-zA-Z0-9' | head -c 16)$(openssl rand -base64 6 | tr -dc '0-9' | head -c 4)"
 
     # Fuso horário
-    ask "Timezone [America/Sao_Paulo]:"
-    read -r APP_TZ
-    APP_TZ="${APP_TZ:-America/Sao_Paulo}"
+    APP_TZ="America/Sao_Paulo"
 
     echo ""
     echo -e "${BOLD}┌────────────────────────────────────────────────────┐"
-    echo -e "│              Resumo da Instalação                  │"
+    echo -e "│         Configuração Gerada Automaticamente        │"
     echo -e "├────────────────────────────────────────────────────┤"
     echo -e "│ Diretório    : ${INSTALL_DIR}"
     echo -e "│ URL          : http://${APP_HOST}:${APP_PORT}"
     echo -e "│ Timezone     : ${APP_TZ}"
-    echo -e "│ MariaDB user : radius / [oculto]"
-    echo -e "│ RADIUS IP    : MikroTik @ ${MIKROTIK_IP}"
+    echo -e "│ MariaDB user : radius / [gerado automaticamente]"
+    echo -e "│ RADIUS secret: [gerado automaticamente]"
+    echo -e "│ MikroTik IP  : ${MIKROTIK_IP}"
     echo -e "│ Web server   : ${WEB_SERVER}"
-    echo -e "│ Admin login  : admin@hotspot.local / [definido]"
+    echo -e "│ Admin login  : admin@hotspot.local / [gerado automaticamente]"
     echo -e "│ Execução     : root"
     echo -e "└────────────────────────────────────────────────────┘${NC}"
     echo ""
-    ask "Confirmar e iniciar instalação? [s/N]:"
-    read -r CONFIRM
-    [[ "${CONFIRM,,}" == "s" ]] || { info "Instalação cancelada."; exit 0; }
+    info "Instalação iniciando em 5 segundos... (Ctrl+C para cancelar)"
+    sleep 5
 }
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -738,30 +720,100 @@ EOF
 }
 
 # ══════════════════════════════════════════════════════════════════════════════
-# RESUMO FINAL
+# RESUMO FINAL + ARQUIVO DE CREDENCIAIS
 # ══════════════════════════════════════════════════════════════════════════════
 print_summary() {
     local SERVER_IP
     SERVER_IP=$(hostname -I | awk '{print $1}')
 
+    local CRED_FILE="/root/hotspot-manager-credentials.txt"
+    local INSTALL_DATE
+    INSTALL_DATE=$(date "+%d/%m/%Y %H:%M:%S")
+
+    # ── Grava arquivo de credenciais ─────────────────────────────────────────
+    cat > "$CRED_FILE" <<EOF
+================================================================================
+  HOTSPOT MANAGER — CREDENCIAIS DE INSTALAÇÃO
+  Gerado em: ${INSTALL_DATE}
+================================================================================
+
+ACESSO AO PAINEL
+  Painel Admin  : http://${APP_HOST}:${APP_PORT}/admin
+  Captive Portal: http://${APP_HOST}:${APP_PORT}/portal
+  Login         : admin@hotspot.local
+  Senha         : ${ADMIN_PASS}
+
+BANCO DE DADOS (MariaDB)
+  Host    : 127.0.0.1
+  Porta   : 3306
+  Banco   : radius
+  Usuário : radius
+  Senha   : ${DB_PASS}
+  Acesso  : mariadb -u radius -p'${DB_PASS}' radius
+
+FREERADIUS
+  RADIUS Secret : ${RADIUS_SECRET}
+  Porta Auth    : 1812/udp
+  Porta Acct    : 1813/udp
+  MikroTik IP   : ${MIKROTIK_IP}
+
+SERVIDOR
+  IP do servidor: ${SERVER_IP}
+  Diretório app : ${INSTALL_DIR}
+  Web server    : ${WEB_SERVER}
+  Timezone      : ${APP_TZ}
+
+CONFIGURAR MIKROTIK (Terminal / Winbox)
+  /radius add \\
+      service=hotspot \\
+      address=${SERVER_IP} \\
+      secret=${RADIUS_SECRET} \\
+      authentication-port=1812 \\
+      accounting-port=1813
+
+  /ip hotspot profile set [find] \\
+      use-radius=yes radius-accounting=yes
+
+TESTAR RADIUS (no servidor)
+  radtest usuario senha 127.0.0.1 0 ${RADIUS_SECRET}
+
+DIAGNÓSTICO
+  journalctl -u freeradius -f
+  journalctl -u ${WEB_SERVER} -f
+  tail -f ${INSTALL_DIR}/storage/logs/laravel.log
+  freeradius -X
+
+LOG DE INSTALAÇÃO
+  /var/log/hotspot-manager-install.log
+
+================================================================================
+  ATENÇÃO: Guarde este arquivo em local seguro e remova-o após salvar as senhas!
+  Para remover: rm -f ${CRED_FILE}
+================================================================================
+EOF
+    chmod 600 "$CRED_FILE"
+    success "Credenciais salvas em: ${CRED_FILE}"
+
+    # ── Exibe resumo no terminal ──────────────────────────────────────────────
     echo ""
     echo -e "${GREEN}${BOLD}"
-    echo "╔══════════════════════════════════════════════════════════════╗"
-    echo "║        INSTALAÇÃO CONCLUÍDA COM SUCESSO!                     ║"
-    echo "╠══════════════════════════════════════════════════════════════╣"
+    echo "╔══════════════════════════════════════════════════════════════════╗"
+    echo "║           INSTALAÇÃO CONCLUÍDA COM SUCESSO!                      ║"
+    echo "╠══════════════════════════════════════════════════════════════════╣"
     echo -e "║${NC}"
-    echo -e "${GREEN}${BOLD}║${NC}  Painel Admin :  ${BOLD}http://${APP_HOST}:${APP_PORT}/admin${NC}"
-    echo -e "${GREEN}${BOLD}║${NC}  Captive Portal: ${BOLD}http://${APP_HOST}:${APP_PORT}/portal${NC}"
+    echo -e "${GREEN}${BOLD}║${NC}  Painel Admin  :  ${BOLD}http://${APP_HOST}:${APP_PORT}/admin${NC}"
+    echo -e "${GREEN}${BOLD}║${NC}  Captive Portal:  ${BOLD}http://${APP_HOST}:${APP_PORT}/portal${NC}"
     echo -e "${GREEN}${BOLD}║${NC}"
-    echo -e "${GREEN}${BOLD}║${NC}  Login admin  :  ${BOLD}admin@hotspot.local${NC}"
-    echo -e "${GREEN}${BOLD}║${NC}  Senha admin  :  ${BOLD}${ADMIN_PASS}${NC}"
+    echo -e "${GREEN}${BOLD}║${NC}  Login admin   :  ${BOLD}admin@hotspot.local${NC}"
+    echo -e "${GREEN}${BOLD}║${NC}  Senha admin   :  ${BOLD}${ADMIN_PASS}${NC}"
     echo -e "${GREEN}${BOLD}║${NC}"
-    echo -e "${GREEN}${BOLD}║${NC}  Arquivos de credenciais (somente root):"
-    echo -e "${GREEN}${BOLD}║${NC}    /root/.hotspot_db.env       (MariaDB)"
-    echo -e "${GREEN}${BOLD}║${NC}    /root/.hotspot_radius.env   (RADIUS secret)"
-    echo -e "${GREEN}${BOLD}╠══════════════════════════════════════════════════════════════╣"
+    echo -e "${GREEN}${BOLD}║${NC}  MariaDB senha :  ${BOLD}${DB_PASS}${NC}"
+    echo -e "${GREEN}${BOLD}║${NC}  RADIUS secret :  ${BOLD}${RADIUS_SECRET}${NC}"
+    echo -e "${GREEN}${BOLD}║${NC}  MikroTik IP   :  ${BOLD}${MIKROTIK_IP}${NC}"
+    echo -e "${GREEN}${BOLD}║${NC}"
+    echo -e "${GREEN}${BOLD}╠══════════════════════════════════════════════════════════════════╣"
     echo -e "║${NC}  Cole no MikroTik (Terminal / Winbox):${GREEN}${BOLD}"
-    echo -e "╠══════════════════════════════════════════════════════════════╣${NC}"
+    echo -e "╠══════════════════════════════════════════════════════════════════╣${NC}"
     echo ""
     printf "  /radius add \\\\\n"
     printf "      service=hotspot \\\\\n"
@@ -773,26 +825,28 @@ print_summary() {
     printf "  /ip hotspot profile set [find] \\\\\n"
     printf "      use-radius=yes radius-accounting=yes\n"
     echo ""
-    echo -e "${GREEN}${BOLD}╠══════════════════════════════════════════════════════════════╣"
-    echo -e "║  Testar RADIUS:                                              ║"
-    echo -e "╠══════════════════════════════════════════════════════════════╣${NC}"
+    echo -e "${GREEN}${BOLD}╠══════════════════════════════════════════════════════════════════╣"
+    echo -e "║  Testar RADIUS:                                                  ║"
+    echo -e "╠══════════════════════════════════════════════════════════════════╣${NC}"
     echo "  radtest usuario senha 127.0.0.1 0 ${RADIUS_SECRET}"
     echo ""
-    echo -e "${GREEN}${BOLD}╠══════════════════════════════════════════════════════════════╣"
-    echo -e "║  Diagnóstico:                                                ║"
-    echo -e "╠══════════════════════════════════════════════════════════════╣${NC}"
+    echo -e "${GREEN}${BOLD}╠══════════════════════════════════════════════════════════════════╣"
+    echo -e "║  Diagnóstico:                                                    ║"
+    echo -e "╠══════════════════════════════════════════════════════════════════╣${NC}"
     echo "  journalctl -u freeradius -f"
     echo "  journalctl -u ${WEB_SERVER} -f"
     echo "  tail -f ${INSTALL_DIR}/storage/logs/laravel.log"
     echo "  freeradius -X                  # debug interativo"
     echo ""
-    echo -e "${GREEN}${BOLD}╠══════════════════════════════════════════════════════════════╣"
-    echo -e "║  Log completo desta instalação:                              ║"
-    echo -e "╠══════════════════════════════════════════════════════════════╣${NC}"
-    echo "  /var/log/hotspot-manager-install.log"
+    echo -e "${GREEN}${BOLD}╠══════════════════════════════════════════════════════════════════╣"
+    echo -e "║  Arquivos de referência:                                         ║"
+    echo -e "╠══════════════════════════════════════════════════════════════════╣${NC}"
+    echo "  ${CRED_FILE}   (CREDENCIAIS — chmod 600)"
+    echo "  /var/log/hotspot-manager-install.log        (log completo)"
     echo ""
-    echo -e "${YELLOW}${BOLD}  ATENÇÃO: Altere a senha do admin no primeiro acesso!${NC}"
-    echo -e "${GREEN}${BOLD}╚══════════════════════════════════════════════════════════════╝${NC}"
+    echo -e "${YELLOW}${BOLD}  ATENÇÃO: Guarde as credenciais acima antes de fechar este terminal!${NC}"
+    echo -e "${YELLOW}${BOLD}  Arquivo salvo em: ${CRED_FILE}${NC}"
+    echo -e "${GREEN}${BOLD}╚══════════════════════════════════════════════════════════════════╝${NC}"
     echo ""
 }
 
